@@ -1,4 +1,5 @@
 local workspace = require("config.workspace")
+local attention = require("config.attention")
 
 local M = {}
 
@@ -10,7 +11,14 @@ function M.render()
     local digit = index == 10 and 0 or index
     local label = ("%d %s"):format(digit, workspace.tab_title(tabpage))
     local hl = tabpage == current and "%#TabLineSel#" or "%#TabLine#"
-    parts[#parts + 1] = ("%%%dT%s %s "):format(index, hl, label)
+    local status = attention.status(tabpage)
+    local mark = ""
+    if status == "ready" then
+      mark = "%#TabLineReady# ✓" .. hl
+    elseif status == "question" then
+      mark = "%#TabLineQuestion# ?" .. hl
+    end
+    parts[#parts + 1] = ("%%%dT%s %s%s "):format(index, hl, label:gsub("%%", "%%%%"), mark)
   end
 
   parts[#parts + 1] = "%#TabLineFill#%T"

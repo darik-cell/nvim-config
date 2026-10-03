@@ -83,5 +83,6 @@ require("lazy").setup("plugins", {
 })
 
 require("config.tabline").setup()
+require("config.attention").setup()
 require("config.keymaps")
 require("config.autocmds")

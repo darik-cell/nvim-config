@@ -1,0 +1,6 @@
+# Merge these settings into the existing [tui] table in ~/.codex/config.toml.
+# This is a notification snippet, not a replacement for the full Codex config.
+[tui]
+notifications = ["agent-turn-complete", "approval-requested", "async-question"]
+notification_method = "osc9"
+notification_condition = "always"

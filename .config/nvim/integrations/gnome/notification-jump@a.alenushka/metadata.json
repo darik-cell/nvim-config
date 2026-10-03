@@ -1,0 +1,7 @@
+{
+  "uuid": "notification-jump@a.alenushka",
+  "name": "Notification Jump",
+  "description": "Super+N opens the newest pending terminal notification.",
+  "shell-version": ["46"],
+  "version": 1
+}
