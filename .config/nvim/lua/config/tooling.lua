@@ -47,9 +47,6 @@ M.lsp = {
       },
     },
   },
-  marksman = {
-    mason = "marksman",
-  },
   taplo = {
     mason = "taplo",
   },

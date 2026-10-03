@@ -146,6 +146,7 @@ return {
               ["Ч"] = "cut_to_clipboard",
               ["p"] = tree.focus_parent,
               ["з"] = tree.focus_parent,
+              ["<leader>p"] = "paste_from_clipboard",
               ["."] = tree.set_root_and_tcd,
               ["<leader>cp"] = tree.copy_selected_path,
               ["oc"] = "none",
