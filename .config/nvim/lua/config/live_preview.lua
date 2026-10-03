@@ -7,11 +7,8 @@ local assets = {
   [asset_prefix .. "task-list.js"] = "task-list.js",
 }
 
-local state = {
-  filepath = nil,
-  token = nil,
-}
-
+local page_paths = {}
+local page_tokens = {}
 local installed = false
 
 local function normalized_path(path)
@@ -94,7 +91,7 @@ local function find_loaded_buffer(path)
   end
 end
 
-local function update_loaded_buffer(bufnr, line_number, checked, expected_hash)
+local function update_loaded_buffer(path, bufnr, line_number, checked, expected_hash)
   if not vim.bo[bufnr].modifiable or vim.bo[bufnr].readonly then
     return nil, "The Markdown buffer is read-only", 423
   end
@@ -115,7 +112,7 @@ local function update_loaded_buffer(bufnr, line_number, checked, expected_hash)
 
   local was_modified = vim.bo[bufnr].modified
   if not was_modified then
-    local disk_result, disk_err, disk_code = update_file(state.filepath, line_number, checked, expected_hash)
+    local disk_result, disk_err, disk_code = update_file(path, line_number, checked, expected_hash)
     if not disk_result then
       return nil, disk_err, disk_code
     end
@@ -250,16 +247,16 @@ update_file = function(path, line_number, checked, expected_hash)
   }
 end
 
-local function update_source(line_number, checked, expected_hash)
-  local bufnr, buffer_err = find_loaded_buffer(state.filepath)
+function M.update_source(path, line_number, checked, expected_hash)
+  local bufnr, buffer_err = find_loaded_buffer(path)
   if buffer_err then
     return nil, buffer_err, 409
   end
   if bufnr then
-    return update_loaded_buffer(bufnr, line_number, checked, expected_hash)
+    return update_loaded_buffer(path, bufnr, line_number, checked, expected_hash)
   end
 
-  return update_file(state.filepath, line_number, checked, expected_hash)
+  return update_file(path, line_number, checked, expected_hash)
 end
 
 local function parse_headers(request)
@@ -324,7 +321,8 @@ local function send_json(handler, server, client, status, payload)
 end
 
 local function handle_toggle(handler, server, client, token, params)
-  if not state.filepath or not state.token or token ~= state.token then
+  local path = page_paths[token or ""]
+  if not path then
     send_json(handler, server, client, "403 Forbidden", { ok = false, error = "Invalid preview token" })
     return
   end
@@ -351,7 +349,9 @@ local function handle_toggle(handler, server, client, token, params)
     return
   end
 
-  local result, err, code = update_source(line_number, checked, expected_hash:lower())
+  local result, err, code = require("config.live_preview_process").update_source(
+    path, line_number, checked, expected_hash:lower()
+  )
   if not result then
     local statuses = {
       [409] = "409 Conflict",
@@ -369,8 +369,8 @@ local function handle_toggle(handler, server, client, token, params)
   send_json(handler, server, client, "200 OK", result)
 end
 
-local function inject_preview_ui(html)
-  if not state.token then
+local function inject_preview_ui(html, token)
+  if not token then
     return html
   end
 
@@ -397,7 +397,7 @@ local function inject_preview_ui(html)
 
   local head = table.concat({
     '<meta http-equiv="Cache-Control" content="no-store">',
-    '<meta name="live-preview-token" content="' .. state.token .. '">',
+    '<meta name="live-preview-token" content="' .. token .. '">',
     '<link rel="stylesheet" href="/live-preview.nvim/static/highlight/github.min.css">',
     '<link rel="stylesheet" href="' .. asset_prefix .. 'light.css">',
   }, "\n")
@@ -409,26 +409,29 @@ local function inject_preview_ui(html)
   return html
 end
 
-function M.setup(opts)
-  require("livepreview.config").set(opts or {})
-  if installed then
-    return
+-- Called over RPC by the detached worker; keep unsaved editor content authoritative.
+function M.read_source(path)
+  local bufnr, err = find_loaded_buffer(path)
+  if err then
+    error(err)
   end
-  installed = true
+  if bufnr then
+    return table.concat(vim.api.nvim_buf_get_lines(bufnr, 0, -1, false), "\n")
+  end
+  return vim.NIL
+end
 
+function M.setup_worker()
   local template = require("livepreview.template")
   local server = require("livepreview.server")
   local handler = require("livepreview.server.handler")
-  local livepreview = require("livepreview")
-  local assets_root = vim.fs.joinpath(vim.fn.stdpath("config"), "static", "livepreview")
-
-  local original_md2html = template.md2html
-  template.md2html = function(markdown)
-    return inject_preview_ui(original_md2html(markdown))
-  end
-
+  local utils = require("livepreview.utils")
+  local assets_root = vim.fs.joinpath(vim.env.LIVE_PREVIEW_CONFIG, "static", "livepreview")
   local original_routes = server.Server.routes
   server.Server.routes = function(self, path)
+    if path == "/live-preview.nvim/static/ws-client.js" then
+      return vim.fs.joinpath(assets_root, "ws-client.js")
+    end
     local asset = assets[path]
     if asset then
       return vim.fs.joinpath(assets_root, asset)
@@ -437,12 +440,12 @@ function M.setup(opts)
   end
 
   local original_request = handler.request
-  handler.request = function(client, request)
-    local target = request:match("^POST ([^%s]+) HTTP/%d%.%d")
+  handler.request = function(client, raw_request)
+    local target = raw_request:match("^POST ([^%s]+) HTTP/%d%.%d")
     if target then
       local path, params = parse_query(target)
       if path == endpoint then
-        local token = parse_headers(request)["x-livepreview-token"]
+        local token = parse_headers(raw_request)["x-livepreview-token"]
         vim.schedule(function()
           local ok, err = xpcall(function()
             handle_toggle(handler, server, client, token, params)
@@ -450,53 +453,92 @@ function M.setup(opts)
           if not ok then
             vim.notify("live-preview checkbox error: " .. err, vim.log.levels.ERROR)
             pcall(send_json, handler, server, client, "500 Internal Server Error", {
-              ok = false,
-              error = "Unexpected error while updating Markdown",
+              ok = false, error = "Unexpected error while updating Markdown",
             })
           end
         end)
-        return nil
+        -- The caller must distinguish asynchronous HTTP from WebSocket upgrades.
+        return { handled = true }
       end
+      handler.send_http_response(client, "405 Method Not Allowed", "text/plain", "Method not allowed")
+      return { handled = true }
     end
-    return original_request(client, request)
+    local result = original_request(client, raw_request)
+    if result then
+      -- Split before decoding: an encoded question mark belongs to the filename.
+      local request_path = raw_request:match("^GET ([^%s?]+)") or "/"
+      result.path = vim.uri_decode(request_path)
+    end
+    return result
   end
 
   local original_serve_file = handler.serve_file
   handler.serve_file = function(client, file_path, if_none_match, accept)
-    if state.filepath and vim.fs.normalize(file_path) == state.filepath then
-      if_none_match = nil
+    if utils.supported_filetype(file_path) ~= "markdown" or not (accept or ""):match("text/html") then
+      return original_serve_file(client, file_path, if_none_match, accept)
     end
-    return original_serve_file(client, file_path, if_none_match, accept)
-  end
-
-  local original_send_http_response = handler.send_http_response
-  handler.send_http_response = function(client, status, content_type, body, headers)
-    if content_type:match("^text/html") then
-      local updated_headers = {}
-      for name, value in pairs(headers or {}) do
-        updated_headers[name] = value
+    vim.schedule(function()
+      local path = normalized_path(file_path)
+      local process = require("config.live_preview_process")
+      local content = process.read_source(path)
+      if not content then
+        handler.send_http_response(client, "404 Not Found", "text/plain", "Markdown file not found")
+        return
       end
-      updated_headers["Cache-Control"] = "no-store"
-      headers = updated_headers
-    end
-    return original_send_http_response(client, status, content_type, body, headers)
+      local token = page_tokens[path] or new_token()
+      page_tokens[path], page_paths[token] = token, path
+      process.track_source(path, content)
+      local body = inject_preview_ui(template.md2html(content), token)
+      handler.send_http_response(client, "200 OK", "text/html; charset=UTF-8", body, {
+        ["Cache-Control"] = "no-store",
+      })
+    end)
   end
+end
 
-  local original_start = livepreview.start
-  livepreview.start = function(filepath, port)
-    local previous = vim.deepcopy(state)
-    state.filepath = normalized_path(filepath)
-    state.token = new_token()
-
-    local ok, result = pcall(original_start, filepath, port)
-    if not ok then
-      state = previous
-      error(result)
+function M.setup(opts)
+  require("livepreview.config").set(opts or {})
+  if installed then
+    return
+  end
+  installed = true
+  local process = require("config.live_preview_process")
+  local livepreview = require("livepreview")
+  local utils = require("livepreview.utils")
+  local open_browser = utils.open_browser
+  local pending_path
+  livepreview.start = function(path)
+    local port, err = process.start()
+    if not port then
+      vim.notify("live-preview: " .. tostring(err), vim.log.levels.ERROR)
+      return false
     end
-    if not result then
-      state = previous
+    pending_path = normalized_path(path)
+    process.prepare(pending_path)
+    require("livepreview.config").config.port = port
+    return true
+  end
+  utils.open_browser = function(url, browser)
+    if pending_path then
+      url = process.url(pending_path)
+      pending_path = nil
     end
-    return result
+    return open_browser(url, browser)
+  end
+  livepreview.is_running = process.is_running
+  livepreview.close = function()
+    -- The plugin calls close from VimLeavePre; tabs own the detached worker.
+    if vim.v.exiting == vim.NIL then
+      process.stop()
+    end
+  end
+  if require("livepreview.config").config.sync_scroll then
+    vim.api.nvim_create_autocmd({ "CursorMoved", "CursorMovedI", "WinScrolled" }, {
+      group = vim.api.nvim_create_augroup("DetachedLivePreviewScroll", { clear = true }),
+      callback = function()
+        process.scroll(vim.api.nvim_buf_get_name(0), vim.api.nvim_win_get_cursor(0))
+      end,
+    })
   end
 end
 
