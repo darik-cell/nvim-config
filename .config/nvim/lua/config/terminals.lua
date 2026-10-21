@@ -171,7 +171,7 @@ local function is_regular_file_window(win, tabpage)
   end
 
   local buf = vim.api.nvim_win_get_buf(win)
-  if vim.bo[buf].buftype ~= "" then
+  if vim.bo[buf].buftype ~= "" and not vim.b[buf].nvim_tab_scratch then
     return false
   end
 
@@ -303,6 +303,8 @@ local function update_bottom_terminal_locals(term, slot)
   vim.b[term.bufnr].nvim_alt_bottom_terminal = true
   vim.b[term.bufnr].nvim_alt_terminal_slot = slot
   vim.b[term.bufnr].nvim_alt_terminal_role = "shell"
+  vim.b[term.bufnr].nvim_alt_terminal_tab = term.tabpage
+  M.attach_prompt_keys(term.bufnr)
   vim.keymap.set("t", "<Esc>", [[<C-\><C-n><Cmd>lua require('config.terminals').focus_last_file_window()<CR>]], {
     buffer = term.bufnr,
     silent = true,
@@ -480,12 +482,14 @@ local function preferred_agent_window()
   return fallback or current
 end
 
-local function mark_agent_buffer(bufnr)
+local function mark_agent_buffer(bufnr, tabpage)
   vim.bo[bufnr].bufhidden = "hide"
   vim.b[bufnr].nvim_alt_terminal = true
   vim.b[bufnr].nvim_alt_agent_terminal = true
   vim.b[bufnr].nvim_alt_terminal_role = "agent"
+  vim.b[bufnr].nvim_alt_terminal_tab = tabpage or workspace.current_tab()
   vim.b[bufnr].nvim_alt_terminal_slot = vim.NIL
+  M.attach_prompt_keys(bufnr)
 end
 
 local function apply_agent_window_state(win, bufnr)
@@ -514,6 +518,7 @@ local function ensure_agent_term()
   term = {
     bufnr = bufnr,
     job_id = nil,
+    tabpage = workspace.current_tab(),
   }
 
   st.agent_term = term
@@ -547,11 +552,52 @@ local function paste(text, term)
   local chan = channel_for(term)
   if not chan then
     vim.notify("Terminal channel is not ready yet", vim.log.levels.WARN)
-    return
+    return false
   end
 
   local payload = "\27[200~" .. text .. "\27[201~"
-  vim.api.nvim_chan_send(chan, payload)
+  local ok, err = pcall(vim.api.nvim_chan_send, chan, payload)
+  if not ok then
+    vim.notify("Не удалось передать промпт: " .. tostring(err), vim.log.levels.ERROR)
+  end
+  return ok
+end
+
+-- Start a fresh shell in a restored buffer, keeping the existing tab/slot layout.
+function M.restore_job(bufnr, tabpage, item, argv, cwd)
+  local st = tabpage and state(tabpage) or nil
+  vim.b[bufnr].nvim_alt_terminal_tab = tabpage
+  local term = { bufnr = bufnr, tabpage = tabpage, _nvim_alt_slot = item.slot, _nvim_alt_role = item.role }
+  if item.role == "shell" and st and type(item.slot) == "number" then
+    st.terminals[item.slot] = term
+    update_bottom_terminal_locals(term, item.slot)
+  elseif item.role == "agent" and st then
+    st.agent_term = term
+    mark_agent_buffer(bufnr, tabpage)
+  end
+  term.job_id = vim.fn.jobstart(argv, { term = true, cwd = cwd, on_exit = function()
+    if item.role == "shell" and tabpage then
+      vim.schedule(function() M.on_bottom_terminal_exit(tabpage, item.slot, bufnr) end)
+    end
+  end })
+  local ctx = workspace.prompt_contexts[item.prompt_context_id]
+  if ctx then
+    workspace.bind_prompt_context(ctx, bufnr, term.job_id)
+    M.attach_prompt_keys(bufnr)
+  end
+  if item.role == "shell" and st then update_bottom_terminal_locals(term, item.slot) end
+  for _, win in ipairs(vim.fn.win_findbuf(bufnr)) do
+    if valid_tab_win(win, tabpage) then
+      if item.role == "shell" then
+        vim.api.nvim_win_call(win, function() apply_bottom_window_state(win) end)
+      elseif item.role == "agent" then
+        vim.wo[win].number = false
+        vim.wo[win].relativenumber = false
+        vim.wo[win].signcolumn = "no"
+      end
+    end
+  end
+  return term.job_id
 end
 
 function M.is_bottom_window(win)
@@ -601,8 +647,80 @@ function M.winbar()
   return table.concat(labels, "")
 end
 
+-- Closing a tab must dispose its hidden terminals as well as its visible ones.
+function M.cleanup_tab(tabpage)
+  local candidates = {}
+  local function collect(term)
+    if term then
+      candidates[term.bufnr or term] = term
+    end
+  end
+
+  local st = workspace.state_by_tab[tabpage]
+  if st then
+    for _, term in pairs(st.terminals) do
+      collect(term)
+    end
+    collect(st.agent_term)
+    st.terminals = {}
+    st.agent_term = nil
+    st.terminal_history = {}
+    st.last_terminal_slot = nil
+    st.bottom_win = nil
+    st.agent_win = nil
+  end
+
+  for _, bufnr in ipairs(vim.api.nvim_list_bufs()) do
+    if vim.b[bufnr].nvim_alt_terminal_tab == tabpage and not candidates[bufnr] then
+      collect({ bufnr = bufnr })
+    end
+  end
+
+  local function surviving_owner(bufnr)
+    if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) then
+      return nil
+    end
+    for _, win in ipairs(vim.fn.win_findbuf(bufnr)) do
+      local owner = vim.api.nvim_win_get_tabpage(win)
+      if owner ~= tabpage then
+        return owner
+      end
+    end
+    for owner, other in pairs(workspace.state_by_tab) do
+      if owner ~= tabpage and vim.api.nvim_tabpage_is_valid(owner) then
+        if other.agent_term and other.agent_term.bufnr == bufnr then
+          return owner
+        end
+        for _, term in pairs(other.terminals) do
+          if term.bufnr == bufnr then
+            return owner
+          end
+        end
+      end
+    end
+  end
+
+  for _, term in pairs(candidates) do
+    local owner = surviving_owner(term.bufnr)
+    if owner then
+      vim.b[term.bufnr].nvim_alt_terminal_tab = owner
+    else
+      local job_id = channel_for(term)
+      if job_id then
+        pcall(vim.fn.jobstop, job_id)
+      end
+      if term.bufnr and vim.api.nvim_buf_is_valid(term.bufnr) then
+        pcall(vim.api.nvim_buf_delete, term.bufnr, { force = true })
+      end
+    end
+  end
+end
+
 function M.on_bottom_terminal_exit(tabpage, slot, bufnr)
-  local st = state(tabpage)
+  local st = workspace.state_by_tab[tabpage]
+  if not vim.api.nvim_tabpage_is_valid(tabpage) or not st then
+    return
+  end
   local term = st.terminals[slot]
   if not term or term.bufnr ~= bufnr then
     return
@@ -723,27 +841,108 @@ function M.focus_started_agent(opts)
   return term
 end
 
-function M.paste_into_agent(text)
-  local term = M.focus_started_agent({ normal_mode = false })
-  if not term then
-    vim.notify("Agent terminal is not started. Open it with <leader>ga first.", vim.log.levels.WARN)
-    return
+function M.attach_prompt_keys(bufnr)
+  vim.keymap.set("t", "<CR>", function() M.send_terminal_key("\r") end,
+    { buffer = bufnr, desc = "Submit pasted prompt" })
+  vim.keymap.set("t", "<C-c>", function() M.send_terminal_key("\3") end,
+    { buffer = bufnr, desc = "Cancel pending prompt submission" })
+end
+
+local function context_from_terminal(bufnr)
+  local job = vim.b[bufnr].terminal_job_id
+  local ok, pid = pcall(vim.fn.jobpid, job or -1)
+  local cwd = ok and vim.uv.fs_readlink("/proc/" .. pid .. "/cwd") or nil
+  local ctx = workspace.terminal_prompt_context(bufnr, job, cwd or workspace.current_cwd())
+  M.attach_prompt_keys(bufnr)
+  return ctx
+end
+
+function M.prompt_context()
+  if vim.bo.buftype == "terminal" then return context_from_terminal(vim.api.nvim_get_current_buf()) end
+  local ctx = workspace.context_for_path(vim.api.nvim_buf_get_name(0)) or workspace.last_prompt_context()
+  if ctx then return ctx end
+  local term = M.started_agent() or state().terminals[state().last_terminal_slot]
+  if term and term.bufnr and vim.api.nvim_buf_is_valid(term.bufnr) then return context_from_terminal(term.bufnr) end
+  return workspace.new_prompt_context(workspace.current_cwd())
+end
+
+function M.focus_prompt_context(ctx)
+  local buf, job = ctx.terminal_bufnr, ctx.job_id
+  if not buf or not vim.api.nvim_buf_is_valid(buf) or vim.b[buf].terminal_job_id ~= job
+    or not job or vim.fn.jobwait({ job }, 0)[1] ~= -1 then return false end
+  for slot, term in pairs(state().terminals) do
+    if term.bufnr == buf then M.goto_slot(slot); return true end
+  end
+  if state().agent_term and state().agent_term.bufnr == buf then
+    return M.focus_started_agent({ normal_mode = false }) ~= nil
+  end
+  for _, win in ipairs(vim.fn.win_findbuf(buf)) do
+    if valid_tab_win(win) then vim.api.nvim_set_current_win(win); focus_mode(false); return true end
+  end
+  vim.api.nvim_set_current_win(preferred_agent_window())
+  vim.cmd("hide buffer " .. buf)
+  focus_mode(false)
+  return true
+end
+
+-- Only an Enter in the same live terminal can complete a queued QQ paste.
+function M.send_terminal_key(key)
+  local tab, buf = workspace.current_tab(), vim.api.nvim_get_current_buf()
+  local ctx = workspace.context_for_terminal(buf)
+  local queued = ctx and ctx.submission
+  if ctx then ctx.submission = nil end
+  local chan = vim.b[buf].terminal_job_id
+  local ok, err = pcall(vim.api.nvim_chan_send, chan or -1, key)
+  if not ok then
+    vim.notify("Не удалось передать клавишу в терминал: " .. tostring(err), vim.log.levels.ERROR)
+    return false
+  end
+  if key == "\r" and queued and queued.tab == tab and queued.job_id == chan
+    and ctx.job_id == chan and vim.fn.jobwait({ chan }, 0)[1] == -1
+    and ctx.path == queued.path and vim.api.nvim_buf_is_valid(queued.bufnr)
+    and vim.api.nvim_buf_get_name(queued.bufnr) == queued.path
+    and table.concat(vim.api.nvim_buf_get_lines(queued.bufnr, 0, -1, false), "\n") == queued.text then
+    workspace.mark_prompt_sent(queued.path, ctx)
+  end
+  return true
+end
+
+function M.paste_into_agent(text, prompt)
+  local ctx = prompt and workspace.prompt_contexts[prompt.context_id]
+  if not ctx then return false end
+  if not ctx.terminal_bufnr then
+    local term = M.started_agent() or state().terminals[state().last_terminal_slot]
+    if term and term.bufnr and vim.api.nvim_buf_is_valid(term.bufnr) then
+      workspace.bind_prompt_context(ctx, term.bufnr, vim.b[term.bufnr].terminal_job_id)
+      M.attach_prompt_keys(term.bufnr)
+    end
+  end
+  if not M.focus_prompt_context(ctx) then
+    vim.notify("Терминал промпта не запущен. Откройте терминал и нажмите Ctrl+G.", vim.log.levels.WARN)
+    return false
   end
 
-  local st = state()
-  paste(text, term)
+  local tab = workspace.current_tab()
+  ctx.submission = nil
+  local chan, buf = ctx.job_id, ctx.terminal_bufnr
+  if not paste(text, { job_id = chan }) then return false end
+  if ctx.path == prompt.path then
+    ctx.submission = {
+      path = prompt.path, bufnr = prompt.bufnr, text = text,
+      tab = tab, job_id = chan,
+    }
+  end
   vim.schedule(function()
-    if st.agent_term and st.agent_term.bufnr and vim.api.nvim_buf_is_valid(st.agent_term.bufnr) then
-      local windows = vim.fn.win_findbuf(st.agent_term.bufnr)
-      if windows[1] then
-        vim.api.nvim_set_current_win(windows[1])
-      end
-    end
+    if workspace.current_tab() ~= tab or workspace.context_for_terminal(buf) ~= ctx
+      or ctx.job_id ~= chan or vim.api.nvim_get_current_buf() ~= buf
+      or vim.fn.jobwait({ chan }, 0)[1] ~= -1 then return end
     vim.cmd.startinsert()
   end)
+  return true
 end
 
 function M.on_term_open()
+  vim.b.nvim_alt_terminal_tab = vim.b.nvim_alt_terminal_tab or workspace.current_tab()
   if vim.b.nvim_alt_agent_terminal then
     vim.wo.number = false
     vim.wo.relativenumber = false

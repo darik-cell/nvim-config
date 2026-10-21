@@ -1,7 +1,11 @@
 local M = {
   state_by_tab = {},
-  last_prompt_path = nil,
+  prompt_contexts = {},
+  terminal_contexts = {},
 }
+
+local editor_id = ("%d-%s"):format(vim.uv.os_getpid(), tostring(vim.uv.hrtime()))
+local context_number = 0
 
 function M.current_tab()
   return vim.api.nvim_get_current_tabpage()
@@ -20,7 +24,6 @@ function M.state(tabpage)
       bottom_terminal_height = 14,
       agent_term = nil,
       agent_win = nil,
-      prompt_path = nil,
     }
   end
 
@@ -51,87 +54,124 @@ function M.is_markdown(path)
   return lowered:match("%.md$") ~= nil or lowered:match("%.markdown$") ~= nil
 end
 
-function M.prompt_dir(tabpage)
-  return vim.fs.joinpath(M.current_cwd(tabpage), ".ai", "prompts")
+function M.prompt_base(cwd)
+  local home = vim.fs.normalize(vim.fn.expand("~"))
+  cwd = vim.fs.normalize(cwd)
+  if cwd == home then return "/tmp" end
+  if cwd:sub(1, #home + 1) == home .. "/" then
+    return vim.fs.joinpath("/tmp", cwd:sub(#home + 2))
+  end
+  return vim.fs.joinpath("/tmp/_outside-home", (cwd:gsub("^/+", "")))
 end
 
-function M.ensure_prompt_dir(tabpage)
-  local dir = M.prompt_dir(tabpage)
-  vim.fn.mkdir(dir, "p")
+function M.new_prompt_context(cwd, saved)
+  context_number = context_number + 1
+  saved = saved or {}
+  local ctx = {
+    id = saved.id or (editor_id .. "-" .. context_number), cwd = cwd,
+    directory = saved.directory, path = saved.path, sequence = saved.sequence or 0,
+  }
+  M.prompt_contexts[ctx.id] = ctx
+  return ctx
+end
+
+function M.bind_prompt_context(ctx, bufnr, job_id)
+  ctx.terminal_bufnr, ctx.job_id, ctx.submission = bufnr, job_id, nil
+  M.terminal_contexts[bufnr] = ctx.id
+end
+
+function M.context_for_terminal(bufnr)
+  local ctx = M.prompt_contexts[M.terminal_contexts[bufnr]]
+  if ctx and vim.api.nvim_buf_is_valid(bufnr) and ctx.job_id == vim.b[bufnr].terminal_job_id then return ctx end
+end
+
+function M.terminal_prompt_context(bufnr, job_id, cwd)
+  local ctx = M.context_for_terminal(bufnr)
+  if not ctx or ctx.job_id ~= job_id then
+    ctx = M.new_prompt_context(cwd)
+    M.bind_prompt_context(ctx, bufnr, job_id)
+  end
+  return ctx
+end
+
+function M.remember_prompt_context(ctx, tabpage)
+  M.state(tabpage).last_prompt_context = ctx.id
+end
+
+function M.last_prompt_context(tabpage)
+  return M.prompt_contexts[M.state(tabpage).last_prompt_context]
+end
+
+function M.context_for_path(path)
+  path = vim.fs.normalize(path or "")
+  for _, ctx in pairs(M.prompt_contexts) do
+    if ctx.path == path or (ctx.directory and path:sub(1, #ctx.directory + 1) == ctx.directory .. "/") then return ctx end
+  end
+end
+
+function M.snapshot_prompt_contexts()
+  local result = {}
+  for id, ctx in pairs(M.prompt_contexts) do
+    result[id] = { id = id, cwd = ctx.cwd, directory = ctx.directory, path = ctx.path, sequence = ctx.sequence }
+  end
+  return result
+end
+
+function M.restore_prompt_contexts(contexts)
+  for id, saved in pairs(contexts or {}) do
+    saved.id = id
+    M.new_prompt_context(saved.cwd, saved)
+  end
+end
+
+function M.prompt_dir(ctx)
+  ctx.directory = ctx.directory or vim.fs.joinpath(M.prompt_base(ctx.cwd), "session-" .. ctx.id)
+  return ctx.directory
+end
+
+function M.ensure_prompt_dir(ctx)
+  local dir = M.prompt_dir(ctx)
+  vim.fn.mkdir(dir, "p", 448)
   return dir
 end
 
 function M.make_prompt_name(timestamp)
   timestamp = timestamp or os.time()
-
-  local months = {
-    "января",
-    "февраля",
-    "марта",
-    "апреля",
-    "мая",
-    "июня",
-    "июля",
-    "августа",
-    "сентября",
-    "октября",
-    "ноября",
-    "декабря",
-  }
-  local weekdays = {
-    ["0"] = "ВС",
-    ["1"] = "ПН",
-    ["2"] = "ВТ",
-    ["3"] = "СР",
-    ["4"] = "ЧТ",
-    ["5"] = "ПТ",
-    ["6"] = "СБ",
-  }
-
-  local day = os.date("%d", timestamp)
-  local month = months[tonumber(os.date("%m", timestamp))]
-  local weekday = weekdays[os.date("%w", timestamp)]
-  local hm = os.date("%H:%M", timestamp)
-  return ("%s-%s-%s-%s.md"):format(day, month, weekday, hm)
+  local months = { "января", "февраля", "марта", "апреля", "мая", "июня",
+    "июля", "августа", "сентября", "октября", "ноября", "декабря" }
+  local weekdays = { ["0"] = "ВС", ["1"] = "ПН", ["2"] = "ВТ", ["3"] = "СР",
+    ["4"] = "ЧТ", ["5"] = "ПТ", ["6"] = "СБ" }
+  return ("%s-%s-%s-%s.md"):format(os.date("%d", timestamp), months[tonumber(os.date("%m", timestamp))],
+    weekdays[os.date("%w", timestamp)], os.date("%H:%M", timestamp))
 end
 
-function M.new_prompt_path(tabpage)
-  local dir = M.ensure_prompt_dir(tabpage)
+-- Reserve the file atomically; update draft/sequence only after creation succeeds.
+function M.create_prompt(ctx)
+  local dir = M.ensure_prompt_dir(ctx)
   local name = M.make_prompt_name()
-  local path = vim.fs.joinpath(dir, name)
-  if vim.uv.fs_stat(path) == nil then
-    return path
-  end
-
-  local stem = name:gsub("%.md$", "")
-  local index = 1
+  local index = 0
   while true do
-    local candidate = vim.fs.joinpath(dir, ("%s-%02d.md"):format(stem, index))
-    if vim.uv.fs_stat(candidate) == nil then
-      return candidate
+    local candidate = index == 0 and name or name:gsub("%.md$", ("-%02d.md"):format(index))
+    local path = vim.fs.joinpath(dir, candidate)
+    local fd, err, code = vim.uv.fs_open(path, "wx", 384)
+    if fd then
+      vim.uv.fs_close(fd)
+      ctx.sequence = ctx.sequence + 1
+      ctx.path, ctx.submission = path, nil
+      return path
     end
+    if code ~= "EEXIST" then error(err) end
     index = index + 1
   end
 end
 
-function M.set_prompt_path(path, tabpage)
-  tabpage = tabpage or M.current_tab()
-  local st = M.state(tabpage)
-  st.prompt_path = path and vim.fn.fnamemodify(path, ":p") or nil
-  if st.prompt_path then
-    M.last_prompt_path = st.prompt_path
+function M.mark_prompt_sent(path, ctx)
+  if ctx.path == vim.fn.fnamemodify(path, ":p") then
+    ctx.path, ctx.submission = nil, nil
   end
 end
 
-function M.prompt_path(tabpage)
-  return M.state(tabpage).prompt_path
-end
-
-function M.last_created_prompt_path()
-  return M.last_prompt_path
-end
-
-function M.is_prompt_markdown(path, tabpage)
+function M.is_prompt_markdown(path)
   path = vim.fn.fnamemodify(path or "", ":p")
   if not M.is_markdown(path) then
     return false
@@ -142,8 +182,7 @@ function M.is_prompt_markdown(path, tabpage)
     return true
   end
 
-  local dir = vim.fs.normalize(M.prompt_dir(tabpage))
-  return path:sub(1, #dir + 1) == dir .. "/"
+  return M.context_for_path(path) ~= nil
 end
 
 function M.new_tab()

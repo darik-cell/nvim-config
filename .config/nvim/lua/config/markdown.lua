@@ -220,8 +220,9 @@ local function current_path()
 end
 
 local function open_in_current_editor(path)
-  local target = vim.fn.fnameescape(path)
-  vim.cmd(("hide edit %s"):format(target))
+  local buf = vim.fn.bufadd(path)
+  vim.fn.bufload(buf)
+  vim.cmd(("hide buffer %d"):format(buf))
 end
 
 local function preferred_editor_window()
@@ -301,33 +302,45 @@ function M.open_tree_node_in_mdview(state)
   M.open_mdview(node.path)
 end
 
-function M.create_new_prompt()
-  local path = workspace.new_prompt_path()
-  local file = io.open(path, "w")
-  if file then
-    file:close()
+function M.create_new_prompt(ctx)
+  local ok, path = pcall(workspace.create_prompt, ctx)
+  if not ok then
+    vim.notify("Не удалось создать промпт: " .. tostring(path), vim.log.levels.ERROR)
+    return nil
   end
-
-  workspace.set_prompt_path(path)
   open_in_editor(path)
   return path
 end
 
 function M.open_prompt()
-  local path = workspace.prompt_path()
-  if path and vim.uv.fs_stat(path) then
+  local ctx = terminals.prompt_context()
+  workspace.remember_prompt_context(ctx)
+  local path = ctx.path
+  if path then
     open_in_editor(path)
     return path
   end
 
-  path = workspace.last_created_prompt_path()
-  if path and vim.uv.fs_stat(path) then
-    workspace.set_prompt_path(path)
-    open_in_editor(path)
-    return path
-  end
+  return M.create_new_prompt(ctx)
+end
 
-  return M.create_new_prompt()
+function M.open_scratch()
+  local st = workspace.state()
+  local buf = st.scratch_bufnr
+  if not buf or not vim.api.nvim_buf_is_valid(buf) then
+    buf = vim.api.nvim_create_buf(false, true)
+    vim.bo[buf].bufhidden = "hide"
+    vim.bo[buf].swapfile = false
+    vim.bo[buf].filetype = "markdown"
+    vim.b[buf].nvim_tab_scratch = true
+    st.scratch_bufnr = buf
+  end
+  if vim.api.nvim_get_mode().mode:sub(1, 1) == "t" then vim.cmd.stopinsert() end
+  local win = preferred_editor_window()
+  if win then vim.api.nvim_set_current_win(win) end
+  vim.cmd("hide buffer " .. buf)
+  st.last_file_win = vim.api.nvim_get_current_win()
+  return buf
 end
 
 function M.send_prompt_buffer()
@@ -338,7 +351,11 @@ function M.send_prompt_buffer()
 
   local lines = vim.api.nvim_buf_get_lines(0, 0, -1, false)
   local text = table.concat(lines, "\n")
-  terminals.paste_into_agent(text)
+  return terminals.paste_into_agent(text, {
+    path = path,
+    context_id = (workspace.context_for_path(path) or {}).id,
+    bufnr = current_buf(),
+  })
 end
 
 function M.handle_heading_anchor_trigger()

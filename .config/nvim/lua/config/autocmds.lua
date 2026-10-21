@@ -3,6 +3,29 @@ local workspace = require("config.workspace")
 
 local group = vim.api.nvim_create_augroup("nvim-alt", { clear = true })
 
+local function refresh_markdown_link_style()
+  for _, capture in ipairs({ "@markup.link", "@markup.link.label", "@markup.link.url" }) do
+    vim.api.nvim_set_hl(0, capture .. ".markdown_inline", { fg = "#51afef", underline = true })
+  end
+end
+
+refresh_markdown_link_style()
+
+vim.api.nvim_create_autocmd("TabClosed", {
+  group = group,
+  callback = function()
+    for tab, st in pairs(workspace.state_by_tab) do
+      if not vim.api.nvim_tabpage_is_valid(tab) then
+        require("config.terminals").cleanup_tab(tab)
+        if st.scratch_bufnr and vim.api.nvim_buf_is_valid(st.scratch_bufnr) then
+          vim.api.nvim_buf_delete(st.scratch_bufnr, { force = true })
+        end
+        workspace.state_by_tab[tab] = nil
+      end
+    end
+  end,
+})
+
 local function restore_regular_window_state()
   if vim.bo.buftype ~= "" then
     return
@@ -16,6 +39,18 @@ local function restore_regular_window_state()
   vim.wo.relativenumber = true
   vim.wo.signcolumn = "yes"
   vim.wo.winfixheight = false
+end
+
+local function restore_markdown_window_state(win)
+  win = win or vim.api.nvim_get_current_win()
+  if vim.bo[vim.api.nvim_win_get_buf(win)].filetype ~= "markdown" then
+    return
+  end
+
+  vim.wo[win].wrap = true
+  vim.wo[win].linebreak = true
+  vim.wo[win].spell = false
+  vim.wo[win].conceallevel = 2
 end
 
 local function remember_regular_file_window()
@@ -35,6 +70,10 @@ local function remember_regular_file_window()
 end
 
 local function autosave_buffer(bufnr)
+  if vim.g.nvim_session_restoring then
+    return
+  end
+
   if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) then
     return
   end
@@ -67,6 +106,7 @@ vim.api.nvim_create_autocmd("ColorScheme", {
   group = group,
   callback = function()
     require("config.terminals").refresh_panel_style()
+    refresh_markdown_link_style()
   end,
 })
 
@@ -74,6 +114,7 @@ vim.api.nvim_create_autocmd({ "BufWinEnter", "WinEnter" }, {
   group = group,
   callback = function()
     restore_regular_window_state()
+    restore_markdown_window_state()
     remember_regular_file_window()
   end,
 })
@@ -111,10 +152,9 @@ vim.api.nvim_create_autocmd("FileType", {
   pattern = "markdown",
   callback = function(args)
     vim.bo[args.buf].textwidth = 0
-    vim.wo.wrap = true
-    vim.wo.linebreak = true
-    vim.wo.spell = false
-    vim.wo.conceallevel = 2
+    for _, win in ipairs(vim.fn.win_findbuf(args.buf)) do
+      restore_markdown_window_state(win)
+    end
     vim.bo[args.buf].omnifunc = "v:lua.require'config.markdown'.complete_anchor"
     vim.opt_local.formatoptions:append({ "n" })
     vim.keymap.set("i", "#", markdown.handle_heading_anchor_trigger, {
@@ -167,11 +207,6 @@ vim.api.nvim_create_autocmd("TermOpen", {
 vim.api.nvim_create_autocmd("BufEnter", {
   group = group,
   callback = function()
-    local path = vim.fn.fnamemodify(vim.api.nvim_buf_get_name(0), ":p")
-    if workspace.is_prompt_markdown(path) then
-      workspace.set_prompt_path(path)
-    end
-
     if vim.bo.filetype ~= "neo-tree" then
       return
     end
