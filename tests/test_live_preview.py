@@ -17,7 +17,7 @@ import subprocess
 import tempfile
 import time
 import unittest
-from urllib.parse import quote, urlencode, urljoin, urlsplit
+from urllib.parse import quote, unquote, urlencode, urljoin, urlsplit
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -61,8 +61,8 @@ vim.opt.swapfile = false
 vim.opt.shadafile = "NONE"
 dofile(vim.env.TEST_PLUGIN .. "/plugin/livepreview.lua")
 local captured_url
-require("livepreview.utils").open_browser = function(url) captured_url = url end
-require("config.live_preview").setup({ dynamic_root = true })
+require("livepreview.utils").open_browser = function(url) captured_url = url; _G.preview_test_url = url end
+require("config.live_preview").setup({ dynamic_root = true, sync_scroll = false })
 vim.api.nvim_cmd({cmd = "edit", args = {vim.env.TEST_FIRST}}, {})
 vim.api.nvim_cmd({cmd = "LivePreview", args = {"start", vim.env.TEST_FIRST}}, {})
 local file = assert(io.open(vim.env.TEST_READY, "w"))
@@ -112,12 +112,12 @@ file:close()
         except OSError:
             return False
 
-    def get(self, url):
+    def get(self, url, accept="text/html"):
         parts = urlsplit(url)
         connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=8)
         try:
             connection.request("GET", parts.path + ("?" + parts.query if parts.query else ""),
-                               headers={"Accept": "text/html"})
+                               headers={"Accept": accept})
             response = connection.getresponse()
             return response.status, response.read().decode()
         finally:
@@ -153,7 +153,7 @@ file:close()
         client.sendall(bytes([0x88, 0x80, 1, 2, 3, 4]))
         client.close()
 
-    def websocket_update(self, client):
+    def websocket_message(self, client):
         def read_exact(count):
             result = b""
             while len(result) < count:
@@ -161,17 +161,77 @@ file:close()
                 self.assertTrue(chunk, "WebSocket closed while receiving a message")
                 result += chunk
             return result
+        header = read_exact(2)
+        length = header[1] & 127
+        if length == 126:
+            length = struct.unpack("!H", read_exact(2))[0]
+        elif length == 127:
+            length = struct.unpack("!Q", read_exact(8))[0]
+        return json.loads(read_exact(length))
+
+    def websocket_update(self, client):
         for _ in range(10):
-            header = read_exact(2)
-            length = header[1] & 127
-            if length == 126:
-                length = struct.unpack("!H", read_exact(2))[0]
-            elif length == 127:
-                length = struct.unpack("!Q", read_exact(8))[0]
-            message = json.loads(read_exact(length))
+            message = self.websocket_message(client)
             if message["type"] == "update":
                 return message
         self.fail("No content update received after ten WebSocket messages")
+
+    def test_tree_and_buffer_actions_open_selected_html_and_markdown(self):
+        document = self.notes / "Страница ?#.html"
+        document.write_text("<!doctype html><html><body>Selected HTML</body></html>")
+        self.editor_lua('vim.opt.runtimepath:append(' + json.dumps(str(PLUGIN.parent / "mini.pairs")) + '); return true')
+        for path in (document, self.second):
+            with self.subTest(path=path):
+                opened = self.editor_lua(
+                    'local node = {type="file", path=' + json.dumps(str(path), ensure_ascii=False) + '}; '
+                    'require("config.markdown").open_tree_node_in_live_preview('
+                    '{tree={get_node=function() return node end}}); return _G.preview_test_url'
+                )
+                self.assertEqual(unquote(urlsplit(opened).path), str(path))
+                self.assertEqual(self.get(opened)[0], 200)
+                self.assertEqual(self.editor_lua('return vim.api.nvim_buf_get_name(0)'), str(self.first))
+        opened = self.editor_lua(
+            'local buffer = vim.fn.bufadd(' + json.dumps(str(document), ensure_ascii=False) + '); '
+            'vim.fn.bufload(buffer); vim.api.nvim_set_current_buf(buffer); '
+            'require("config.markdown").open_current_buffer_in_live_preview(); return _G.preview_test_url'
+        )
+        self.assertEqual(unquote(urlsplit(opened).path), str(document))
+
+    def test_html_and_requested_assets_reload_only_after_saving(self):
+        document = self.notes / "page.html"
+        original = '<!doctype html><html><head><link rel="stylesheet" href="sub/style.css"></head><body>Saved<script src="app.js"></script></body></html>'
+        document.write_text(original)
+        css = self.notes / "sub/style.css"
+        script = self.notes / "app.js"
+        css.write_text("body { color: red; }")
+        script.write_text('console.log("saved");')
+        url = urljoin(self.url, "page.html")
+        status, body = self.get(url)
+        self.assertEqual(status, 200)
+        self.assertIn(original.split("<body>")[1], body)
+        self.assertIn("/live-preview.nvim/static/ws-client.js", body)
+        self.assertNotIn("markdown-body", body)
+        self.assertEqual(self.get(urljoin(url, "sub/style.css"), "text/css")[1], css.read_text())
+        self.assertEqual(self.get(urljoin(url, "app.js"), "*/*")[1], script.read_text())
+        client = self.websocket()
+        self.editor_lua(
+            'vim.api.nvim_cmd({cmd="edit", args={' + json.dumps(str(document)) + '}}, {}); '
+            'vim.api.nvim_buf_set_lines(0, 0, -1, false, {"<html><body>Unsaved</body></html>"}); return true'
+        )
+        self.assertIn("Saved", self.get(url)[1])
+        client.settimeout(1.1)
+        with self.assertRaises(socket.timeout):
+            client.recv(1)
+        client.settimeout(8)
+        self.editor_lua('vim.cmd("write"); return true')
+        self.assertEqual(self.websocket_message(client)["type"], "reload")
+        self.assertIn("Unsaved", self.get(url)[1])
+        for asset, content, accept in ((css, "body { color: blue; }", "text/css"),
+                                       (script, 'console.log("changed");', "*/*")):
+            with self.subTest(asset=asset):
+                asset.write_text(content)
+                self.assertEqual(self.websocket_message(client)["type"], "reload")
+                self.assertEqual(self.get(urljoin(url, str(asset.relative_to(self.notes))), accept)[1], content)
 
     def test_transitive_links_parent_paths_queries_and_encoded_names(self):
         self.assertEqual(urlsplit(self.url).path, quote(str(self.first), safe="/"))

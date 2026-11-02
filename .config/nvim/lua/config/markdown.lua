@@ -212,7 +212,7 @@ local function notify_invalid_mdview()
 end
 
 local function notify_invalid_live_preview()
-  vim.notify("live-preview supports only .md and .markdown files", vim.log.levels.WARN)
+  vim.notify("Предпросмотр поддерживает файлы .md, .markdown и .html", vim.log.levels.WARN)
 end
 
 local function current_path()
@@ -251,7 +251,7 @@ end
 
 function M.open_live_preview(path)
   path = vim.fn.fnamemodify(path or "", ":p")
-  if not workspace.is_markdown(path) then
+  if not workspace.is_markdown(path) and not path:match("%.html$") then
     notify_invalid_live_preview()
     return
   end

@@ -12,6 +12,14 @@ data_home="$(realpath -m -- "${XDG_DATA_HOME:-${HOME}/.local/share}")"
 local_bin="$(realpath -m -- "${HOME}/.local/bin")"
 export PATH="${local_bin}:${PATH}"
 
+repo_fingerprint() {
+  {
+    git -C "${repo_root}" status --porcelain=v1 --untracked-files=all
+    git -C "${repo_root}" diff --binary HEAD
+  } | sha256sum | cut -d ' ' -f 1
+}
+initial_repo_fingerprint="$(repo_fingerprint)"
+
 fail() {
   printf 'ERROR: %s\n' "$*" >&2
   exit 1
@@ -27,9 +35,9 @@ fail() {
 nvim_version="$("${local_bin}/nvim" --version | sed -n '1p')"
 kitty_version="$("${local_bin}/kitty" --version)"
 tree_sitter_version="$("${local_bin}/tree-sitter" --version)"
-[[ ${nvim_version} == 'NVIM v0.12.4'* ]] || fail "unexpected Nvim version: ${nvim_version}"
-[[ ${kitty_version} == 'kitty 0.48.2'* ]] || fail "unexpected Kitty version: ${kitty_version}"
-[[ ${tree_sitter_version} == 'tree-sitter 0.26.6'* ]] || fail "unexpected tree-sitter version: ${tree_sitter_version}"
+[[ ${nvim_version} == 'NVIM v0.12.6'* ]] || fail "unexpected Nvim version: ${nvim_version}"
+[[ ${kitty_version} == 'kitty 0.49.2'* ]] || fail "unexpected Kitty version: ${kitty_version}"
+[[ ${tree_sitter_version} == 'tree-sitter 0.27.1'* ]] || fail "unexpected tree-sitter version: ${tree_sitter_version}"
 printf '%s\n' "${nvim_version}" "${kitty_version}" "${tree_sitter_version}"
 "${local_bin}/mdview" --help >/dev/null
 
@@ -45,7 +53,7 @@ export CONFIGS_REPO_ROOT="${repo_root}"
 "${local_bin}/kitty" +runpy 'import os, runpy; from kitty.config import load_config; root=os.environ["CONFIGS_REPO_ROOT"]; bad=[]; load_config(root + "/.config/kitty/kitty.conf", accumulate_bad_lines=bad); assert not bad, bad; draw=runpy.run_path(root + "/.config/kitty/tab_bar.py")["draw_title"]; assert draw({"title":"  smoke  ","index":2}) == "2 smoke"'
 "${local_bin}/nvim" --headless -i NONE "+lua dofile([[${repo_root}/scripts/nvim/verify.lua]])" '+qa'
 
-[[ -z $(git -C "${repo_root}" status --porcelain=v1 --untracked-files=all) ]] || fail 'repository changed during verification'
+[[ $(repo_fingerprint) == "${initial_repo_fingerprint}" ]] || fail 'repository changed during verification'
 
 login_shell="${SHELL:-/bin/bash}"
 [[ -x ${login_shell} ]] || fail "login shell is not executable: ${login_shell}"

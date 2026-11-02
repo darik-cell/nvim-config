@@ -1,5 +1,26 @@
 return {
   {
+    "MeanderingProgrammer/render-markdown.nvim",
+    ft = "markdown",
+    config = function(_, opts)
+      require("config.markdown_table_borders").setup()
+      require("render-markdown").setup(opts)
+    end,
+    opts = {
+      heading = { enabled = false },
+      paragraph = { enabled = false },
+      code = { enabled = false },
+      dash = { enabled = false },
+      bullet = { enabled = false },
+      checkbox = { enabled = false },
+      quote = { enabled = false },
+      link = { enabled = false },
+      sign = { enabled = false },
+      pipe_table = { cell = "padded", wrap = true, render_modes = { "i" } },
+      anti_conceal = { enabled = true },
+    },
+  },
+  {
     "folke/lazydev.nvim",
     ft = "lua",
     opts = {},

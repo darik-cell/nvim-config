@@ -85,8 +85,8 @@ cd ~/configs
 
 Скрипт:
 
-- скачивает официальные Nvim 0.12.4, Kitty 0.48.2, tree-sitter CLI 0.26.6 и
-  FiraCode Nerd Font 3.4.0 для архитектуры host;
+- скачивает официальные Nvim 0.12.6, Kitty 0.49.2, tree-sitter CLI 0.27.1 и
+  FiraCode Nerd Font 3.5.1 для архитектуры host;
 - проверяет SHA-256 каждого архива;
 - удаляет только заранее напечатанные Nvim/Kitty user-пути;
 - устанавливает binaries в `~/.local`, не меняя системные версии;

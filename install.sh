@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-NVIM_VERSION="0.12.4"
-KITTY_VERSION="0.48.2"
-TREE_SITTER_VERSION="0.26.6"
-FONT_VERSION="3.4.0"
+NVIM_VERSION="0.12.6"
+KITTY_VERSION="0.49.2"
+TREE_SITTER_VERSION="0.27.1"
+FONT_VERSION="3.5.1"
 
 usage() {
   printf 'Usage: %s [--check|--yes]\n' "$0"
@@ -72,19 +72,19 @@ fi
 case "$(uname -m)" in
   x86_64)
     nvim_asset="nvim-linux-x86_64.tar.gz"
-    nvim_sha="012bf3fcac5ade43914df3f174668bf64d05e049a4f032a388c027b1ebd78628"
+    nvim_sha="474430d53e6264f6d6dd18db42d6dc9df3a1b56ca9e88a325bbf860e1a811d87"
     kitty_asset="kitty-${KITTY_VERSION}-x86_64.txz"
-    kitty_sha="967a1958e7fc67b495d279c0963bcd1a0482097151817ce6506fabc822689af7"
+    kitty_sha="d573618b911e9c461bd421b96c13c74c7f1cb2f1ac9c327818d4ff84366cf5c6"
     tree_asset="tree-sitter-linux-x64.gz"
-    tree_sha="2b9595064a7d9dbe208c6f09f521d73061f8039e4ffcc2fd08979d249aeabb54"
+    tree_sha="d01042f94ba3d6827ddc9788e235f75d8366431be42bdf90ade534d960c98b7d"
     ;;
   aarch64|arm64)
     nvim_asset="nvim-linux-arm64.tar.gz"
-    nvim_sha="ceb7e88c6b681f0515d135dcdfad54f5eb4373b25ce6172197cd9a69c758063f"
+    nvim_sha="8f1f64a0bdb97247034038c3823c6cbad5bdf9ecd5751b85494b71c3ee04c815"
     kitty_asset="kitty-${KITTY_VERSION}-arm64.txz"
-    kitty_sha="534b214d407a05e4603da75ef02fffa592ec1bbec20a413c5e0cd3f853c928cb"
+    kitty_sha="0c81a995614426cccf0fecaf7d104d47cd63bbccf173d14976e9f92e3d60fce6"
     tree_asset="tree-sitter-linux-arm64.gz"
-    tree_sha="7beef62e5d2683085b87188be83b1a73c59229110a125c5f12d922ae57789a7a"
+    tree_sha="404be5d54a4955571c4067c21d4699660eab3a534cefb0659341b207f7139ec5"
     ;;
   *)
     printf 'ERROR: unsupported architecture: %s\n' "$(uname -m)" >&2
@@ -226,7 +226,7 @@ download "https://github.com/neovim/neovim/releases/download/v${NVIM_VERSION}/${
 download "https://github.com/kovidgoyal/kitty/releases/download/v${KITTY_VERSION}/${kitty_asset}" "${kitty_sha}" "${kitty_archive}"
 download "https://github.com/tree-sitter/tree-sitter/releases/download/v${TREE_SITTER_VERSION}/${tree_asset}" "${tree_sha}" "${tree_archive}"
 download "https://github.com/ryanoasis/nerd-fonts/releases/download/v${FONT_VERSION}/FiraCode.tar.xz" \
-  "d83fb093e0e05a531cd6f19886a6ceb884a4fa5ea3b53cf099fc1f30c5b3e47d" "${font_archive}"
+  "68e3bd6164864b8b514605bc34e3a87ac401c8c48682fcce6478c70263340207" "${font_archive}"
 
 nvim_stage="${temporary_dir}/nvim"
 kitty_stage="${temporary_dir}/kitty"

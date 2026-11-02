@@ -3,6 +3,7 @@ local uv = vim.uv
 local worker_channel, worker_port
 local editor_channel, editor_socket
 local sources = {}
+local files = {}
 local clients = {}
 local idle_deadline
 local timer, listener
@@ -57,6 +58,16 @@ end
 
 function M.track_source(path, content)
   sources[path] = content
+end
+
+local function file_stamp(path)
+  local stat = uv.fs_stat(path)
+  return stat and table.concat({ stat.ino, stat.size, stat.mtime.sec, stat.mtime.nsec }, ":") or false
+end
+
+-- HTML and its requested assets update only after they are saved to disk.
+function M.track_file(path)
+  files[path] = file_stamp(path)
 end
 
 local function forget(client)
@@ -195,6 +206,17 @@ function M.serve()
         sources[path] = content
         broadcast({ type = "update", filepath = path, content = content })
       end
+    end
+    local changed = false
+    for path, previous in pairs(files) do
+      local stamp = file_stamp(path)
+      if stamp ~= previous then
+        files[path] = stamp
+        changed = true
+      end
+    end
+    if changed then
+      broadcast({ type = "reload" })
     end
   end))
 end

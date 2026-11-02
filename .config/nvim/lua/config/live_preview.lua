@@ -474,22 +474,38 @@ function M.setup_worker()
 
   local original_serve_file = handler.serve_file
   handler.serve_file = function(client, file_path, if_none_match, accept)
-    if utils.supported_filetype(file_path) ~= "markdown" or not (accept or ""):match("text/html") then
+    local filetype = utils.supported_filetype(file_path)
+    local is_page = (filetype == "markdown" or filetype == "html") and (accept or ""):match("text/html")
+    local is_asset = file_path:match("%.css$") or file_path:match("%.js$") or file_path:match("%.mjs$")
+    if not is_page and not is_asset then
       return original_serve_file(client, file_path, if_none_match, accept)
     end
     vim.schedule(function()
       local path = normalized_path(file_path)
       local process = require("config.live_preview_process")
-      local content = process.read_source(path)
+      local markdown = is_page and filetype == "markdown"
+      local content = markdown and process.read_source(path) or utils.read_file(path)
       if not content then
-        handler.send_http_response(client, "404 Not Found", "text/plain", "Markdown file not found")
+        handler.send_http_response(client, "404 Not Found", "text/plain", "File not found")
         return
       end
-      local token = page_tokens[path] or new_token()
-      page_tokens[path], page_paths[token] = token, path
-      process.track_source(path, content)
-      local body = inject_preview_ui(template.md2html(content), token)
-      handler.send_http_response(client, "200 OK", "text/html; charset=UTF-8", body, {
+      local body, content_type
+      if markdown then
+        local token = page_tokens[path] or new_token()
+        page_tokens[path], page_paths[token] = token, path
+        process.track_source(path, content)
+        body = inject_preview_ui(template.md2html(content), token)
+      else
+        process.track_file(path)
+        body = is_page and template.handle_body(content) or content
+      end
+      if is_page then
+        content_type = "text/html; charset=UTF-8"
+      else
+        content_type = require("livepreview.server.utils.content_type").get(path)
+          or "text/javascript; charset=UTF-8"
+      end
+      handler.send_http_response(client, "200 OK", content_type, body, {
         ["Cache-Control"] = "no-store",
       })
     end)
