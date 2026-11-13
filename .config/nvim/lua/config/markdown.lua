@@ -1,5 +1,6 @@
 local workspace = require("config.workspace")
 local terminals = require("config.terminals")
+local terminal_view = require("config.terminal_view")
 local minipairs = require("mini.pairs")
 
 local M = {}
@@ -225,28 +226,22 @@ local function open_in_current_editor(path)
   vim.cmd(("hide buffer %d"):format(buf))
 end
 
-local function preferred_editor_window()
+local function preferred_editor_window(path)
+  local fallback
   for _, win in ipairs(vim.api.nvim_tabpage_list_wins(vim.api.nvim_get_current_tabpage())) do
     if vim.api.nvim_win_get_config(win).relative == "" then
       local buf = vim.api.nvim_win_get_buf(win)
       local bt = vim.bo[buf].buftype
       local ft = vim.bo[buf].filetype
       if bt ~= "terminal" and ft ~= "neo-tree" and ft ~= "neo-tree-popup" then
-        return win
+        if path and vim.api.nvim_buf_get_name(buf) == path then
+          return win
+        end
+        fallback = fallback or win
       end
     end
   end
-end
-
-local function open_in_editor(path)
-  if vim.api.nvim_get_mode().mode:sub(1, 1) == "t" then
-    vim.cmd.stopinsert()
-  end
-  local win = preferred_editor_window()
-  if win then
-    vim.api.nvim_set_current_win(win)
-  end
-  open_in_current_editor(path)
+  return fallback
 end
 
 function M.open_live_preview(path)
@@ -302,26 +297,175 @@ function M.open_tree_node_in_mdview(state)
   M.open_mdview(node.path)
 end
 
+local function save_prompt_buffer(buf)
+  vim.api.nvim_buf_call(buf, function()
+    if vim.bo.modified or not vim.uv.fs_stat(current_path()) then
+      vim.cmd("silent write")
+    end
+  end)
+end
+
+local function prompt_window(ctx)
+  local current = vim.api.nvim_get_current_win()
+  local function matches(win)
+    local buf = vim.api.nvim_win_get_buf(win)
+    return vim.api.nvim_win_get_config(win).relative == ""
+      and workspace.context_for_path(vim.api.nvim_buf_get_name(buf)) == ctx
+  end
+  if matches(current) then return current end
+  for _, win in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+    if matches(win) then return win end
+  end
+end
+
+local function terminal_window(ctx)
+  for _, win in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+    if vim.api.nvim_win_get_config(win).relative == ""
+      and vim.api.nvim_win_get_buf(win) == ctx.terminal_bufnr then
+      return win
+    end
+  end
+end
+
+local function save_terminal_view(ctx)
+  local win = terminal_window(ctx)
+  if not win then return nil end
+  if vim.api.nvim_get_current_win() == win then
+    ctx.prompt_terminal_input = vim.api.nvim_get_mode().mode:sub(1, 1) == "t"
+  end
+  return terminal_view.capture(ctx, win)
+end
+
+local function restore_terminal_view(ctx, saved)
+  terminal_view.restore(ctx, saved)
+end
+
+function M.remember_terminal_mode()
+  if vim.bo.buftype ~= "terminal" then return end
+  local ctx = workspace.context_for_terminal(current_buf())
+  if ctx then
+    ctx.prompt_terminal_input = vim.api.nvim_get_mode().mode:sub(1, 1) == "t"
+  end
+end
+
+local function focus_window(win, terminal_input)
+  vim.cmd.stopinsert()
+  vim.api.nvim_set_current_win(win)
+  local tab = vim.api.nvim_get_current_tabpage()
+  vim.schedule(function()
+    if vim.api.nvim_get_current_tabpage() ~= tab or vim.api.nvim_get_current_win() ~= win then return end
+    if terminal_input then vim.cmd.startinsert() else vim.cmd.stopinsert() end
+  end)
+end
+
+local function show_prompt(path, ctx)
+  local saved = save_terminal_view(ctx)
+  local win = prompt_window(ctx)
+  if win then
+    focus_window(win, false)
+  else
+    local source = terminal_window(ctx)
+    if source then
+      focus_window(source, false)
+    elseif ctx.terminal_bufnr and vim.api.nvim_buf_is_valid(ctx.terminal_bufnr) then
+      vim.cmd("leftabove vsplit")
+      vim.api.nvim_win_set_buf(0, ctx.terminal_bufnr)
+    else
+      vim.notify("Терминал черновика недоступен", vim.log.levels.WARN)
+      return nil
+    end
+    vim.cmd("wincmd H")
+    vim.cmd("rightbelow vsplit")
+  end
+  open_in_current_editor(path)
+  vim.bo.bufhidden = "hide"
+  focus_window(vim.api.nvim_get_current_win(), false)
+  if saved then ctx.prompt_terminal_input = saved.input end
+  restore_terminal_view(ctx, saved)
+  return path
+end
+
+local function hide_prompt(ctx, win, buf, force_input)
+  local saved = save_terminal_view(ctx)
+  buf = buf or vim.api.nvim_win_get_buf(win)
+  local ok, err = pcall(save_prompt_buffer, buf)
+  if not ok then
+    vim.notify("Не удалось сохранить черновик: " .. tostring(err), vim.log.levels.ERROR)
+    return false
+  end
+  local terminal = ctx.terminal_bufnr
+  if not terminal or not vim.api.nvim_buf_is_valid(terminal)
+    or vim.b[terminal].terminal_job_id ~= ctx.job_id
+    or not ctx.job_id or vim.fn.jobwait({ ctx.job_id }, 0)[1] ~= -1 then
+    vim.notify("Терминал черновика не запущен", vim.log.levels.WARN)
+    return false
+  end
+  local source = terminal_window(ctx)
+  if not source then
+    vim.api.nvim_win_set_buf(win, terminal)
+    source = win
+  end
+  local terminal_input = force_input or ctx.prompt_terminal_input == true
+  focus_window(source, terminal_input)
+  if win ~= source and vim.api.nvim_win_is_valid(win) and vim.api.nvim_win_get_buf(win) == buf then
+    vim.api.nvim_win_close(win, false)
+  end
+  if not terminal_input then restore_terminal_view(ctx, saved) end
+  return true
+end
+
 function M.create_new_prompt(ctx)
   local ok, path = pcall(workspace.create_prompt, ctx)
   if not ok then
     vim.notify("Не удалось создать промпт: " .. tostring(path), vim.log.levels.ERROR)
     return nil
   end
-  open_in_editor(path)
-  return path
+  return show_prompt(path, ctx)
 end
 
-function M.open_prompt()
-  local ctx = terminals.prompt_context()
-  workspace.remember_prompt_context(ctx)
-  local path = ctx.path
-  if path then
-    open_in_editor(path)
-    return path
+function M.open_prompt(ctx)
+  ctx = ctx or terminals.prompt_context()
+  if not ctx.terminal_bufnr then
+    local win
+    if not terminals.started_agent() and (vim.api.nvim_buf_get_name(0) ~= "" or vim.bo.modified) then
+      vim.cmd("leftabove vsplit")
+      win = vim.api.nvim_get_current_win()
+    end
+    terminals.open_agent({ normal_mode = true, win = win })
+    ctx = terminals.prompt_context()
   end
-
+  workspace.remember_prompt_context(ctx)
+  if ctx.path then return show_prompt(ctx.path, ctx) end
   return M.create_new_prompt(ctx)
+end
+
+function M.toggle_prompt()
+  local ctx = terminals.prompt_context()
+  local win = prompt_window(ctx)
+  if win then return hide_prompt(ctx, win) end
+  return M.open_prompt(ctx)
+end
+
+function M.cycle_agent_prompt()
+  local ctx = terminals.prompt_context()
+  local target
+  local leaving_input
+  if vim.bo.buftype == "terminal" then
+    leaving_input = vim.api.nvim_get_mode().mode:sub(1, 1) == "t"
+    ctx.prompt_terminal_input = leaving_input
+    target = prompt_window(ctx)
+  elseif workspace.context_for_path(current_path()) == ctx then
+    ctx.prompt_terminal_input = false
+    target = terminal_window(ctx)
+  end
+  if target then
+    focus_window(target, false)
+    if leaving_input ~= nil then ctx.prompt_terminal_input = leaving_input end
+    return
+  end
+  vim.cmd.stopinsert()
+  vim.cmd("wincmd w")
+  focus_window(vim.api.nvim_get_current_win(), false)
 end
 
 function M.open_scratch()
@@ -349,13 +493,33 @@ function M.send_prompt_buffer()
     return
   end
 
-  local lines = vim.api.nvim_buf_get_lines(0, 0, -1, false)
+  local buf, editor_win = current_buf(), vim.api.nvim_get_current_win()
+  local ctx = workspace.context_for_path(path)
+  if not ctx then
+    return false
+  end
+  local ok, err = pcall(function()
+    save_prompt_buffer(buf)
+    local draft = ctx.path and vim.fn.bufnr(ctx.path) or -1
+    if draft > 0 and draft ~= buf then
+      save_prompt_buffer(draft)
+    end
+  end)
+  if not ok then
+    vim.notify("Не удалось сохранить черновик: " .. tostring(err), vim.log.levels.ERROR)
+    return false
+  end
+
+  local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
   local text = table.concat(lines, "\n")
-  return terminals.paste_into_agent(text, {
+  if not terminals.paste_into_agent(text, {
     path = path,
-    context_id = (workspace.context_for_path(path) or {}).id,
-    bufnr = current_buf(),
-  })
+    context_id = ctx.id,
+    bufnr = buf,
+  }) then
+    return false
+  end
+  return hide_prompt(ctx, editor_win, buf, true)
 end
 
 function M.handle_heading_anchor_trigger()

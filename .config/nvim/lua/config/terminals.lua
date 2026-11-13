@@ -532,6 +532,9 @@ local function open_agent_terminal(opts)
   local win = tracked_agent_window()
   local cwd = workspace.current_cwd()
 
+  if not win and opts.win and valid_tab_win(opts.win) then
+    win = opts.win
+  end
   if not win then
     win = preferred_agent_window()
   end
@@ -808,6 +811,7 @@ function M.open_agent(opts)
   opts = opts or {}
   open_agent_terminal({
     normal_mode = opts.normal_mode ~= false,
+    win = opts.win,
   })
 end
 
@@ -899,7 +903,7 @@ function M.send_terminal_key(key)
   end
   if key == "\r" and queued and queued.tab == tab and queued.job_id == chan
     and ctx.job_id == chan and vim.fn.jobwait({ chan }, 0)[1] == -1
-    and ctx.path == queued.path and vim.api.nvim_buf_is_valid(queued.bufnr)
+    and ctx.path == queued.draft_path and vim.api.nvim_buf_is_valid(queued.bufnr)
     and vim.api.nvim_buf_get_name(queued.bufnr) == queued.path
     and table.concat(vim.api.nvim_buf_get_lines(queued.bufnr, 0, -1, false), "\n") == queued.text then
     workspace.mark_prompt_sent(queued.path, ctx)
@@ -928,7 +932,7 @@ function M.paste_into_agent(text, prompt)
   if not paste(text, { job_id = chan }) then return false end
   if ctx.path == prompt.path then
     ctx.submission = {
-      path = prompt.path, bufnr = prompt.bufnr, text = text,
+      path = prompt.path, draft_path = ctx.path, bufnr = prompt.bufnr, text = text,
       tab = tab, job_id = chan,
     }
   end

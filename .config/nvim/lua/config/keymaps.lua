@@ -43,12 +43,12 @@ map("n", "QQ", markdown.send_prompt_buffer, { desc = "Send prompt buffer to agen
 map("n", "ЙЙ", markdown.send_prompt_buffer, { desc = "Send prompt buffer to agent terminal" })
 map("n", "<leader>j", tree.open_tree, { desc = "Open floating tree" })
 map("n", "<leader>cp", tree.copy_cursor_path, { desc = "Copy absolute path" })
-map("n", "<leader>ga", function()
-  terminals.open_agent({ normal_mode = true })
-end, { desc = "Open agent terminal" })
-map("n", "<leader>пф", function()
-  terminals.open_agent({ normal_mode = true })
-end, { desc = "Open agent terminal" })
+for _, lhs in ipairs({ "<leader>ga", "<leader>пф" }) do
+  map("n", lhs, function() terminals.open_agent({ normal_mode = true }) end, { desc = "Open agent terminal" })
+end
+for _, lhs in ipairs({ "<C-w>w", "<C-ц>ц", "<C-w>ц", "<C-ц>w" }) do
+  map({ "n", "i", "t" }, lhs, markdown.cycle_agent_prompt, { desc = "Switch between agent and prompt" })
+end
 map("n", "<leader>gp", markdown.open_scratch, { desc = "Open tab scratch buffer" })
 map("n", "<leader>пз", markdown.open_scratch, { desc = "Open tab scratch buffer" })
 map("n", "<leader>m", markdown.open_current_buffer_in_live_preview, { desc = "Open current Markdown or HTML in live preview" })
@@ -56,8 +56,8 @@ map("n", "<leader>M", markdown.open_current_buffer_in_mdview, { desc = "Open cur
 map("n", "<leader>tn", workspace.new_tab, { desc = "New tab" })
 map("n", "<leader>tq", "<cmd>tabclose<CR>", { desc = "Close tab" })
 map("n", "<leader>to", workspace.close_other_tabs, { desc = "Close other tabs" })
-map({ "n", "i", "t" }, "<C-g>", markdown.open_prompt, { desc = "Open current prompt draft" })
-map({ "n", "i", "t" }, "<C-п>", markdown.open_prompt, { desc = "Open current prompt draft" })
+map({ "n", "i", "t" }, "<C-g>", markdown.toggle_prompt, { desc = "Show or hide prompt draft" })
+map({ "n", "i", "t" }, "<C-п>", markdown.toggle_prompt, { desc = "Show or hide prompt draft" })
 
 for _, lhs in ipairs({ "<C-`>", "<C-ё>" }) do
   map({ "n", "i", "v", "t" }, lhs, terminals.reopen_last, { desc = "Reopen last terminal" })

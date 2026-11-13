@@ -119,6 +119,13 @@ vim.api.nvim_create_autocmd({ "BufWinEnter", "WinEnter" }, {
   end,
 })
 
+vim.api.nvim_create_autocmd("WinLeave", {
+  group = group,
+  callback = function()
+    require("config.markdown").remember_terminal_mode()
+  end,
+})
+
 vim.api.nvim_create_autocmd({ "InsertLeave", "TextChanged", "FocusLost", "BufLeave" }, {
   group = group,
   callback = function(args)
