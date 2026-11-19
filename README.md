@@ -42,6 +42,11 @@ cd ~/configs
 ./verify.sh
 ```
 
+## Расширения Pi (опционально)
+
+`pi-fold` и `static-working` лежат отдельно в [`pi/`](pi/README.md). У них
+своя установка; `install.sh` для Neovim и Kitty их не устанавливает.
+
 ## Предпросмотр Markdown и HTML
 
 `<Space>m` открывает текущий `.md`, `.markdown` или `.html` в браузере через
