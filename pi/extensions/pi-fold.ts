@@ -31,21 +31,24 @@
  */
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { AssistantMessageComponent, ToolExecutionComponent } from "@earendil-works/pi-coding-agent";
+import type { TuiMouseEvent } from "@earendil-works/pi-tui";
 
-interface FoldBox {
+interface FoldClickable {
+  render(width: number): string[];
+  handleMouse?(event: TuiMouseEvent): unknown;
+}
+
+interface FoldBox extends FoldClickable {
   expanded: boolean;
   isPartial: boolean;
   toolName: string;
   toolCallId?: string;
-  ui?: { requestRender?(): void };
-  render(width: number): string[];
+  ui?: { terminal?: { columns: number }; requestRender?(): void };
   updateDisplay(): void;
-  handleMouse?(event: unknown): unknown;
 }
 
-interface AssistantLike {
+interface AssistantLike extends FoldClickable {
   lastMessage?: unknown;
-  handleMouse?(event: unknown): unknown;
 }
 
 interface TidyMessage {
@@ -90,8 +93,10 @@ const TURN_LAYOUT = Symbol.for("pi-tidy:turn-layout");
 
 /** ANSI CSI/OSC sequences, so a probe can read the text a box renders. */
 const ANSI = /\x1b(?:\[[0-9;:?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)?)/g;
-/** Any width works for the marker probe; keep it roomy and away from real ones. */
-const PROBE_WIDTH = 117;
+function foldWidth(box: FoldBox): number {
+  const width = box.ui?.terminal?.columns || process.stdout.columns;
+  return width > 0 ? width : 117;
+}
 
 function registry(): FoldRegistry {
   const g = globalThis as Record<symbol, Partial<FoldRegistry> | undefined>;
@@ -353,15 +358,13 @@ function applyTurn(turn: TidyTurn, dir: "open" | "close" | "toggle"): boolean {
  * summary (closed), its `▾` summary (open), or neither (open with a carrier
  * step owning the header, or the row hidden inside a folded turn).
  *
- * Probing calls the component's own render at a scratch width — the same
- * patched render pi runs every frame, whose caches key on width. Only the
- * marker glyph is read; nothing is mutated.
+ * Probe at the live width so the marker and the click share a layout.
  */
-function headerMarkerOf(box: FoldBox): "closed" | "open" | null {
+function headerMarkerOf(box: FoldBox, width: number): "closed" | "open" | null {
   if (box.isPartial) return null;
   let rows: string[];
   try {
-    rows = box.render(PROBE_WIDTH) ?? [];
+    rows = box.render(width) ?? [];
   } catch {
     return null;
   }
@@ -372,8 +375,16 @@ function headerMarkerOf(box: FoldBox): "closed" | "open" | null {
 }
 
 /** A left click at the component's own row `y`, routed the way a real one is. */
-function click(component: { handleMouse?(event: unknown): unknown }, y: number): void {
-  component.handleMouse?.({ type: "click", button: "left", x: 0, y });
+function click(component: FoldClickable, y: number, width: number): void {
+  if (!component.handleMouse) return;
+  const height = component.render(width).length;
+  if (y < 0 || y >= height) return;
+  // Pi TUI 1.6 routes through cached child layouts keyed by event.width.
+  // A partial event with no bounds can select an undefined layout.
+  component.handleMouse({
+    type: "click", button: "left", x: 0, y, screenX: 0, screenY: y,
+    width, height, shift: false, alt: false, ctrl: false, clickCount: 1,
+  });
 }
 
 /** pi's own setExpanded body, without pi-tidy's turn/group side effects. */
@@ -449,13 +460,14 @@ export default function piFold(pi: ExtensionAPI): void {
       if (!first) return;
 
       const dir = parseDir(parts[2]);
-      const marker = headerMarkerOf(first);
+      const width = foldWidth(first);
+      const marker = headerMarkerOf(first, width);
       if (marker === "closed") {
         // The first member carries the ▸ line at its own row 0; pi-tidy's
         // click routing opens the group and touches no member box.
-        if (dir !== "close") click(first, 0);
+        if (dir !== "close") click(first, 0, width);
       } else if (marker === "open") {
-        if (dir !== "open") click(first, 0);
+        if (dir !== "open") click(first, 0, width);
       } else {
         // No summary on the first member: either a carrier step owns the
         // header (group is open) or the row is hidden (turn folded).
@@ -469,7 +481,7 @@ export default function piFold(pi: ExtensionAPI): void {
             const member = reg.byId.get(id);
             if (member?.expanded) foldBoxToRow(member);
           }
-          click(carrier.comp, carrier.row);
+          click(carrier.comp, carrier.row, width);
         }
       }
       requestRender(reg);
@@ -512,15 +524,16 @@ export default function piFold(pi: ExtensionAPI): void {
       } else {
         // The row click is pi-tidy's own "open this box" path: it opens the
         // group on the way, exactly like clicking the row under the header.
-        click(box, headerMarkerOf(box) ? 1 : 0);
+        const width = foldWidth(box);
+        click(box, headerMarkerOf(box, width) ? 1 : 0, width);
         if (!box.expanded && memberIndex !== undefined && turn) {
           // The row was not on screen (group folded): open the group, retry.
           const { group } = memberOf(turn, memberIndex);
           const firstId = group?.ids[0];
           const first = firstId !== undefined ? reg.byId.get(firstId) : undefined;
-          if (first && headerMarkerOf(first) === "closed") {
-            click(first, 0);
-            click(box, headerMarkerOf(box) ? 1 : 0);
+          if (first && headerMarkerOf(first, width) === "closed") {
+            click(first, 0, width);
+            click(box, headerMarkerOf(box, width) ? 1 : 0, width);
           }
         }
         if (!box.expanded) return;

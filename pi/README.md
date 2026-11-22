@@ -4,12 +4,12 @@
 
 ## pi-fold — сворачивание в Neovim
 
-Нужны Pi в обычном TUI, `pi-tidy` с включёнными группами и сводками ходов (`groupTools: true`, `collapseTurns: "afterRun"`) и Neovim. Версии на исходном хосте: Pi 1.5.2, pi-tidy 0.10.0, Neovim 0.12.6.
+Нужны Pi в обычном TUI, `pi-tidy` с включёнными группами и сводками ходов (`groupTools: true`, `collapseTurns: "afterRun"`) и Neovim. Проверенный комплект: Pi 1.6.0, pi-tidy 0.11.0, Neovim 0.12.6.
 
 Из корня репозитория, если `pi-tidy` ещё не установлен:
 
 ```sh
-pi install npm:pi-tidy@0.10.0
+pi install npm:pi-tidy@0.11.0
 ```
 
 Скопируй расширение. Если одноимённый файл уже есть, сначала сравни его: команда заменит его копией из Git.
