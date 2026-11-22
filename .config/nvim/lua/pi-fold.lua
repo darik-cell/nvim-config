@@ -24,6 +24,8 @@ Keys (terminal-NORMAL mode, i.e. after Ctrl-\ Ctrl-N):
                                → /zbox T I close   (box folds back to its row,
                                  group and turn stay open)
           any other line inside an open turn → /zturn T close
+    <leader>cp  copy the innermost Pi code/reply frame under the cursor.
+                This uses the source text from Pi, not wrapped terminal rows.
 
 pi reprints the whole transcript on each toggle, so the cursor line number
 shifts with the content — the marks are re-parsed from the buffer on every
@@ -654,8 +656,11 @@ end
 -- A plain assistant reply can have NO took/group markers. Its final frame
 -- has a model label and time; a user frame has only an icon and time.
 local function reply_header(line)
-  if not startswith(line, "╭─ ") and not startswith(line, "├─ ") then return nil end
-  local label = line:sub(#"╭─ " + 1):match("^(.-)%s+%d%d:%d%d")
+  if not startswith(line, "╭─") and not startswith(line, "├─") and not startswith(line, "──") then return nil end
+  local start = (startswith(line, "╭") or startswith(line, "├")) and #"╭" + 1 or 1
+  while line:sub(start, start + #"─" - 1) == "─" do start = start + #"─" end
+  if line:sub(start, start) ~= " " then return nil end
+  local label = line:sub(start + 1):match("^(.-)%s+%d%d:%d%d")
   if not label or not label:find("%a") then return nil end
   return (label:gsub("%s+%d%d%d%d%-%d%d%-%d%d$", ""):gsub("%s+%d%d%-%d%d$", ""))
 end
@@ -1029,6 +1034,11 @@ keeper_verify = function(buf)
   keeper_capture(buf, win) -- the restored view is the next pre-change state
 end
 
+local function map_copy(buf)
+  vim.keymap.set("n", "<leader>cp", M.copy_frame,
+    { buffer = buf, silent = true, desc = "Pi: copy code block or reply" })
+end
+
 --- Bounded recognition of a pi-tidy transcript by content (a pi under a
 --- shell reports job /bin/bash, so the keeper cannot use the job command;
 --- plain shell output never carries turn summaries or group headers).
@@ -1045,6 +1055,10 @@ keeper_recognize = function(buf, st)
     end
   end
   st.is_pi = M._keeper_is_pi(scan)
+  if st.is_pi and not st.copy_mapped then
+    map_copy(buf)
+    st.copy_mapped = true
+  end
   st.pi_checked_at = vim.loop.now()
 end
 
@@ -1330,6 +1344,11 @@ function M.dispatch(mode) -- "open" | "close"
   send_fold(buf, ("/zturn %d close"):format(here.turn), { turn = here.turn, kind = "turn", marker = "▸" })
 end
 
+local function is_pi_executable(path)
+  local name = path:match("([^/]+)$")
+  return name == "pi" or name == "piman"
+end
+
 local function job_is_pi(buf)
   -- nvim: b:terminal_job_id is the job/channel id; job_info() takes it directly
   local chan = vim.b[buf].terminal_job_id
@@ -1338,19 +1357,120 @@ local function job_is_pi(buf)
     local cmd = ok and type(info) == "table" and info.cmd or nil
     if type(cmd) == "table" then
       for _, arg in ipairs(cmd) do
-        if arg:match("([^/]+)$") == "pi" then
+        if is_pi_executable(arg) then
           return true
         end
       end
     end
   end
-  -- fallback: the terminal buffer name carries the command — "term://…:pi",
-  -- "term://…:pi --session …"; nvim's job_info() leaves cmd empty for :terminal jobs
+  -- Terminal names carry the executable after the PID, often as an
+  -- absolute path even if jobstart was given just `pi`.
   local name = vim.api.nvim_buf_get_name(buf)
-  return name:match("term://.*:pi$") ~= nil or name:match("term://.*:pi %S") ~= nil
+  local exe = name:match("^term://.*//%d+:([^%s]+)")
+  if not exe then exe = name:match("^term://.*:([^%s]+)") end
+  return exe ~= nil and is_pi_executable(exe)
 end
 
---- Attach zo/zc mappings to a terminal buffer (default: current).
+local COPY_CHIPS = { ["󰆒"] = true, ["\u{f00c}"] = true, copy = true, copied = true }
+
+-- Match only pi-tidy code rules, not edit/write paths with a copy chip.
+-- Preserve whether the rule joins the reply frame; a code row containing a
+-- horizontal line is not the closing joint of a framed block.
+local function code_rule(raw)
+  local rule = vim.trim(clean(raw))
+  local joint = startswith(rule, "├")
+  if joint then rule = rule:sub(#"├" + 1) end
+  for _, edge in ipairs({ "┤", "│" }) do
+    if rule:sub(-#edge) == edge then rule = rule:sub(1, -#edge - 1); break end
+  end
+  rule = vim.trim(rule)
+  for _ = 1, 2 do -- reply rail and/or quote rail
+    if not startswith(rule, "│") then break end
+    rule = vim.trim(rule:sub(#"│" + 1))
+  end
+  return (rule:gsub("^%d+[.)]%s+", ""):gsub("^[-*>]%s+", ""):gsub("^•%s+", "")), joint
+end
+
+local function code_rule_only(rule)
+  return startswith(rule, "─") and rule:gsub("─", "") == ""
+end
+
+local function code_header(rule)
+  while startswith(rule, "─") do rule = rule:sub(#"─" + 1) end
+  local lang, chip, fill = rule:match("^%s*(%S+)%s+(%S+)%s+(%S+)$")
+  if lang and COPY_CHIPS[chip] and code_rule_only(fill) then return lang end
+end
+
+local function reply_frame_top(line)
+  if not reply_header(line) then return nil end
+  if line:sub(-#"╮") == "╮" then return "frame" end
+  if line:sub(-#"─") == "─" then return "rail" end
+end
+
+local function reply_frame_bottom(line)
+  if startswith(line, "╰") then
+    local rule = line:sub(#"╰" + 1)
+    if line:sub(-#"╯") == "╯" and code_rule_only(rule:sub(1, -#"╯" - 1)) then return "frame" end
+    if code_rule_only(rule) then return "rail" end
+  elseif code_rule_only(line) then
+    return "rail"
+  end
+end
+
+local function frame_end(lines, top, kind, joint, style)
+  for i = top + 1, #lines do
+    local line = clean(lines[i]):gsub(" +$", "")
+    local bottom = reply_frame_bottom(line)
+    if bottom and kind == "reply" and bottom == style then return i end
+    -- An unframed code rule can itself start at column zero. The line is only
+    -- an unambiguous reply boundary if it has a corner.
+    if bottom and startswith(line, "╰") then return nil end
+    if reply_frame_top(line) or turn_marker(line) then return nil end
+    if kind == "code" then
+      local rule, closing_joint = code_rule(line)
+      if closing_joint == joint and code_rule_only(rule) then return i end
+      if code_header(rule) then return nil end
+    end
+  end
+end
+
+--- Prefer the innermost frame; its header and closing rule also count as inside.
+--- Display rows identify the frame but are never copied (Pi may soft-wrap them).
+function M._copy_target(lines, row)
+  for top = row, 1, -1 do
+    local line = clean(lines[top]):gsub(" +$", "")
+    if top < row and ((startswith(line, "╰") and reply_frame_bottom(line)) or turn_marker(line)) then return nil end
+    local rule, joint = code_rule(line)
+    local lang = code_header(rule)
+    local style = reply_frame_top(line)
+    local kind = lang and "code" or (style and "reply" or nil)
+    if kind then
+      local bottom = frame_end(lines, top, kind, joint, style)
+      if bottom and row <= bottom then
+        local body = {}
+        for i = top + 1, bottom - 1 do body[#body + 1] = lines[i]:gsub(" +$", "") end
+        return kind, #body, vim.fn.sha256((lang or "") .. "\n" .. table.concat(body, "\n"))
+      end
+      if kind == "reply" then return nil end
+    end
+  end
+end
+
+function M.copy_frame()
+  local buf = vim.api.nvim_get_current_buf()
+  local row = vim.api.nvim_win_get_cursor(0)[1]
+  local kind, count, hash = M._copy_target(vim.api.nvim_buf_get_lines(buf, 0, -1, false), row)
+  local chan = vim.b[buf].terminal_job_id
+  if not kind or not chan then
+    vim.notify("pi-fold: place the cursor inside a Pi code block or reply", vim.log.levels.INFO)
+    return
+  end
+  -- One private terminal input sequence, not editor text or a slash command.
+  -- Copying does not submit or modify Pi's current draft.
+  vim.api.nvim_chan_send(chan, ("\027P+pi-fold-copy;%s;%d;%s\027\\"):format(kind, count, hash))
+end
+
+--- Attach zo/zc and code copy mappings to a terminal buffer (default: current).
 --- `force` skips the pi-job check — useful when pi runs inside a shell
 --- (the terminal's job is /bin/bash, not pi); dispatch() is a no-op unless
 --- the cursor line parses as a pi-tidy marker anyway.
@@ -1367,6 +1487,7 @@ function M.attach(buf, force)
   vim.keymap.set("n", "zc", function()
     M.dispatch("close")
   end, opts)
+  if job_is_pi(buf) then map_copy(buf) end
   keeper_attach(buf) -- passive view keeper (no-op on non-pi content)
 end
 

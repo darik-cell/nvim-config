@@ -1,5 +1,5 @@
 /**
- * pi-fold — fold turns, groups and tool boxes by ordinal, from the keyboard.
+ * pi-fold — fold turns, groups and tool boxes, and copy code, from the keyboard.
  *
  * Companion to pi-tidy in pi's regular TUI, made for a pi running inside a
  * Neovim terminal buffer (nvim's zo/zc mappings count markers in the buffer
@@ -29,8 +29,9 @@
  * pi-tidy's summary cache keys on — without it a reopened turn keeps drawing
  * its stale ▸ line.
  */
+import { createHash } from "node:crypto";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { AssistantMessageComponent, ToolExecutionComponent } from "@earendil-works/pi-coding-agent";
+import { AssistantMessageComponent, ToolExecutionComponent, copyToClipboard } from "@earendil-works/pi-coding-agent";
 import type { TuiMouseEvent } from "@earendil-works/pi-tui";
 
 interface FoldClickable {
@@ -422,6 +423,68 @@ function requestRender(reg: FoldRegistry): void {
   ui?.requestRender?.();
 }
 
+const TURN_CACHE = Symbol.for("pi-tidy:turn-cache");
+const CODE_BLOCKS = Symbol.for("pi-tidy:code-blocks");
+const COPY_REQUEST = /^\x1bP\+pi-fold-copy;(code|reply);(\d{1,6});([0-9a-f]{64})\x1b\\$/;
+
+type CodeLayout = { bodyTop: number; spans?: Array<{ row: number; index: number }> };
+
+function codeClosingRule(row: string): boolean {
+  return /^─+$/.test(row.trim().replace(/^(?:[├│>]\s*){0,3}/, "").replace(/\s*[┤│]$/, ""));
+}
+
+function replyBodyBounds(cache: { out: string[]; framed: boolean; layout: CodeLayout }): { start: number; end: number } | undefined {
+  if (!cache.framed) return undefined;
+  const end = cache.out.length - 1;
+  const bottom = cache.out[end]?.replace(ANSI, "").trim();
+  if (!bottom || !/^(?:╰─+╯|╰?─+)$/.test(bottom)) return undefined;
+  let { bodyTop: start } = cache.layout;
+  // Since pi-tidy 0.11 the frame's vertical padding is outside `bodyTop`.
+  // Neovim counts all rows between the outer borders, including the padding.
+  while (start > 0 && /^│ *│$/.test(cache.out[start - 1]!.replace(ANSI, ""))) start--;
+  return { start, end };
+}
+
+function frameFingerprint(out: string[], start: number, count: number, lang: string): string {
+  const body = out.slice(start, start + count).map((line) => line.replace(ANSI, "").replace(/ +$/, ""));
+  return createHash("sha256").update(`${lang}\n${body.join("\n")}`).digest("hex");
+}
+
+/** Read text from Pi rather than inferring source line breaks from a TUI render.
+ * If two frames look identical but have different source, do not guess. */
+function visibleFrameText(reg: FoldRegistry, kind: string, count: number, fingerprint: string): string | undefined {
+  let found: string | undefined;
+  for (const { comp } of reg.assistants) {
+    const symbols = comp as Record<symbol, unknown>;
+    const cache = symbols[TURN_CACHE] as { out: string[]; framed: boolean; layout: CodeLayout } | undefined;
+    if (!cache || cache.layout !== symbols[TURN_LAYOUT]) continue;
+    const { bodyTop, spans } = cache.layout;
+    if (kind === "reply") {
+      const bounds = replyBodyBounds(cache);
+      if (!bounds || bounds.end - bounds.start !== count) continue;
+      if (frameFingerprint(cache.out, bounds.start, count, "") !== fingerprint) continue;
+      const parts = blocks(comp.lastMessage as TidyMessage | undefined)
+        .flatMap((part) => part.type === "text" && part.text?.trim() ? [part.text] : []);
+      if (!parts.length) continue;
+      const text = parts.join("\n\n");
+      if (found !== undefined && found !== text) return undefined;
+      found = text;
+      continue;
+    }
+    const code = symbols[CODE_BLOCKS] as { blocks: Array<{ lang: string; text: string }> } | undefined;
+    for (const { row, index } of spans ?? []) {
+      const block = code?.blocks[index];
+      const start = bodyTop + row + 1;
+      const close = cache.out[start + count]?.replace(ANSI, "");
+      if (!block || !close || !codeClosingRule(close)) continue;
+      if (frameFingerprint(cache.out, start, count, block.lang) !== fingerprint) continue;
+      if (found !== undefined && found !== block.text) return undefined;
+      found = block.text;
+    }
+  }
+  return found;
+}
+
 export default function piFold(pi: ExtensionAPI): void {
   if (!installCapture()) {
     // Still consume mapped commands if this Pi build lacks the hooks.
@@ -430,6 +493,23 @@ export default function piFold(pi: ExtensionAPI): void {
     }
     return;
   }
+
+  let stopCopyInput: (() => void) | undefined;
+  pi.on("session_start", (_event, ctx) => {
+    if (ctx.mode !== "tui" || !process.env.NVIM) return;
+    stopCopyInput = ctx.ui.onTerminalInput((data) => {
+      const request = COPY_REQUEST.exec(data);
+      if (!request) return;
+      const text = visibleFrameText(registry(), request[1]!, Number(request[2]), request[3]!);
+      if (text === undefined) ctx.ui.notify("pi-fold: frame no longer matches the transcript", "warning");
+      else void copyToClipboard(text).catch(() => ctx.ui.notify("pi-fold: clipboard unavailable", "warning"));
+      return { consume: true };
+    });
+  });
+  pi.on("session_shutdown", () => {
+    stopCopyInput?.();
+    stopCopyInput = undefined;
+  });
 
   // These commands are driven by terminal mappings. A stale or missing
   // target is a quiet no-op, not a transcript entry or a provider prompt.

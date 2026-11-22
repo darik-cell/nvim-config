@@ -4,12 +4,12 @@
 
 ## pi-fold — сворачивание в Neovim
 
-Нужны Pi в обычном TUI, `pi-tidy` с включёнными группами и сводками ходов (`groupTools: true`, `collapseTurns: "afterRun"`) и Neovim. Проверенный комплект: Pi 1.6.0, pi-tidy 0.11.0, Neovim 0.12.6.
+Нужны Pi в обычном TUI, `pi-tidy` с включёнными группами и сводками ходов (`groupTools: true`, `collapseTurns: "afterRun"`) и Neovim. Проверено с Pi 1.6.0 и pi-tidy 0.11.1 на Neovim 0.12.5.
 
 Из корня репозитория, если `pi-tidy` ещё не установлен:
 
 ```sh
-pi install npm:pi-tidy@0.11.0
+pi install npm:pi-tidy
 ```
 
 Скопируй расширение. Если одноимённый файл уже есть, сначала сравни его: команда заменит его копией из Git.
@@ -18,9 +18,13 @@ pi install npm:pi-tidy@0.11.0
 install -Dm644 pi/extensions/pi-fold.ts "$HOME/.pi/agent/extensions/pi-fold.ts"
 ```
 
+Если используешь профиль `piman`, выполни `piman install npm:pi-tidy`, а расширение скопируй в `~/.pi/profiles/piman/extensions/`. Профили используют один бинарник Pi, но не делят установленные пакеты и файлы расширений.
+
 Часть Neovim лежит отдельно: [`pi-fold.lua`](../.config/nvim/lua/pi-fold.lua) и [`pi-fold-frame.lua`](../.config/nvim/lua/pi-fold-frame.lua). В конфиге из этого репозитория подключение уже есть в [`init.lua`](../.config/nvim/init.lua). Для другого конфига положи оба файла рядом в `lua/` и добавь `require("pi-fold").setup()`.
 
-В уже запущенном Pi выполни `/reload`. В terminal-NORMAL, с пустой строкой ввода Pi, проверь `zo`/`zc` на сводке хода или группы инструментов.
+В уже запущенном Pi выполни `/reload`. В terminal-NORMAL (`Ctrl-\`, `Ctrl-N`), с пустой строкой ввода Pi, проверь `zo`/`zc` на сводке хода или группы инструментов.
+
+`<leader>cp` копирует в системный буфер обмена код или ответ под курсором. Работает в обоих стилях оформления `pi-tidy`: `rail` и `frame`. На заголовке, внутри или на нижней границе блока кода копируется только этот блок. В остальной части рамки ответа копируется весь ответ в Markdown. Текст берётся из Pi, поэтому переносы экрана и рамка не попадают в буфер, а текущий черновик не меняется.
 
 ## static-working — опционально
 
