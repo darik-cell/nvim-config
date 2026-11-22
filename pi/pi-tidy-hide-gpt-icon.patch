@@ -1,0 +1,13 @@
+--- a/src/turns/turn-view.ts
++++ b/src/turns/turn-view.ts
+@@ -30 +30 @@
+-  openai: "\uec81", "openai-codex": "\uec81", anthropic: "\uec82",
++  openai: "", "openai-codex": "", anthropic: "\uec82",
+@@ -42 +42,2 @@
+-  return `${icons ? `${providerIcon(provider)} ` : ""}${model || provider || "agent"}`;
++  const icon = icons ? providerIcon(provider) : "";
++  return `${icon ? `${icon} ` : ""}${model || provider || "agent"}`;
+@@ -133 +134,2 @@
+-  add(theme.fg("muted", llm), theme.fg("muted", `${providerIcon(answer?.provider)} ${llm}`));
++  const icon = providerIcon(answer?.provider);
++  add(theme.fg("muted", llm), theme.fg("muted", icon ? `${icon} ${llm}` : llm));
