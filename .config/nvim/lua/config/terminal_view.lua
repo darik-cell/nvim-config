@@ -65,7 +65,8 @@ local function character_start(line, col)
 end
 
 function M.capture(ctx, win)
-  if active[ctx.terminal_bufnr] then cancel(active[ctx.terminal_bufnr]) end
+  local previous = active[ctx.terminal_bufnr]
+  if previous then cancel(previous) end
   ctx.prompt_view_generation = (ctx.prompt_view_generation or 0) + 1
   local saved = {
     win = win, buf = ctx.terminal_bufnr, job = ctx.job_id,
@@ -73,6 +74,28 @@ function M.capture(ctx, win)
     input = ctx.prompt_terminal_input == true, view = view(win),
     tick = vim.api.nvim_buf_get_changedtick(ctx.terminal_bufnr), needles = {},
   }
+  if previous and previous.saved.win == win and previous.saved.job == saved.job
+      and previous.saved.tab == saved.tab and previous.saved.input == saved.input then
+    -- A second Ctrl-G can arrive before the first resize/replay has settled.
+    -- Carry the last intended content anchor forward, NOT the temporary line-1
+    -- cursor caused by clearing scrollback. Real source-window keys already
+    -- cancel the previous state, so deliberate navigation is not inherited.
+    for _, key in ipairs({ "view", "tick", "needles", "row_offset", "col_offset",
+        "tail_lnum", "tail_topline" }) do
+      saved[key] = vim.deepcopy(previous.saved[key])
+    end
+    return saved
+  end
+  local count = vim.api.nvim_buf_line_count(saved.buf)
+  local current_line = vim.api.nvim_buf_get_lines(saved.buf, saved.view.lnum - 1, saved.view.lnum, false)[1] or ""
+  if saved.input or (saved.view.lnum >= count - 3 and current_line:match("^%s*$")) then
+    -- The empty live editor is not a historical text occurrence, even when
+    -- browsed in terminal-NORMAL. Repeated borders cannot identify it safely.
+    -- Keep mode (`saved.input`) separate from the tail-relative view strategy.
+    saved.tail_lnum = count - saved.view.lnum
+    saved.tail_topline = count - saved.view.topline
+    return saved
+  end
   local text, rows = index(saved.buf)
   local anchor_row, anchor_col = saved.view.lnum, nil
   while rows[anchor_row] do
@@ -142,6 +165,15 @@ local function apply(state, first)
   end
   if tick == saved.tick then
     vim.api.nvim_win_call(saved.win, function() vim.fn.winrestview(saved.view) end)
+  elseif saved.tail_lnum ~= nil then
+    local count = vim.api.nvim_buf_line_count(saved.buf)
+    local restored = vim.deepcopy(saved.view)
+    restored.lnum = math.max(1, count - saved.tail_lnum)
+    restored.topline = math.max(1, count - saved.tail_topline)
+    local line = vim.api.nvim_buf_get_lines(saved.buf, restored.lnum - 1, restored.lnum, false)[1] or ""
+    restored.col = character_start(line, math.min(restored.col, #line))
+    restored.curswant, restored.skipcol = restored.col, 0
+    vim.api.nvim_win_call(saved.win, function() vim.fn.winrestview(restored) end)
   else
     local row, col = resolve(saved)
     if row then

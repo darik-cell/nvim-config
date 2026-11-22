@@ -59,7 +59,8 @@ co = coroutine.create(function()
   check(vim.api.nvim_get_current_win() == win, 'restore stole user focus')
   check(vim.api.nvim_win_get_cursor(win)[1] == chosen, 'restore overwrote user scroll')
   vim.api.nvim_set_current_win(prompt_win); key('<C-g>')
-  -- Opening from terminal input must anchor its current live-screen text too.
+  -- Opening from terminal input follows the live screen as output arrives,
+  -- rather than anchoring old text like the normal-mode reading cases above.
   vim.cmd.tabnew()
   local job2 = vim.fn.termopen({'python3', '-u', root .. '/tests/fixtures/resize_tui.py'})
   jobs[#jobs+1] = job2
@@ -73,9 +74,38 @@ co = coroutine.create(function()
   local input_view = vim.api.nvim_win_call(win2, vim.fn.winsaveview)
   local visible = table.concat(vim.api.nvim_buf_get_lines(buf2, input_view.topline - 1,
     input_view.topline - 1 + vim.api.nvim_win_get_height(win2), false), '')
-  check(visible:find('открытии', 1, true) ~= nil, 'input-origin anchor not visible')
+  check(visible:find('redraw-33', 1, true) ~= nil, 'input-origin live output not visible')
   key('<C-g>'); wait(100)
   check(vim.api.nvim_get_mode().mode:sub(1,1) == 't' and vim.api.nvim_get_current_win() == win2, 'input close lost terminal input')
+  -- Pi replays its transcript on resize. An empty editor must not be
+  -- anchored to one of the many identical decorative borders in history.
+  vim.cmd.tabnew()
+  local job3 = vim.fn.termopen({'python3', '-u', root .. '/tests/fixtures/pi_resize_tui.py'})
+  jobs[#jobs+1] = job3
+  local buf3, win3 = vim.api.nvim_get_current_buf(), vim.api.nvim_get_current_win()
+  wait(350); vim.cmd.startinsert(); wait(100)
+  local before = vim.api.nvim_win_call(win3, vim.fn.winsaveview)
+  local tail = vim.api.nvim_buf_line_count(buf3) - before.lnum
+  check(tail == 2, 'Pi-like empty editor cursor unavailable')
+  for attempt = 1, 2 do
+    key('<C-g>')
+    local ctx3 = workspace.context_for_terminal(buf3)
+    check(ctx3 and ctx3.path, 'Pi-like prompt missing')
+    dirs[vim.fs.dirname(ctx3.path)] = true
+    local draft_win = vim.api.nvim_get_current_win()
+    wait(1100)
+    local current = vim.api.nvim_win_call(win3, vim.fn.winsaveview)
+    local count = vim.api.nvim_buf_line_count(buf3)
+    check(current.lnum == count - tail, 'empty Pi editor jumped into old transcript: ' .. vim.inspect(current))
+    local screen = table.concat(vim.api.nvim_buf_get_lines(buf3, current.topline - 1,
+      math.min(count, current.topline - 1 + vim.api.nvim_win_get_height(win3)), false), '')
+    check(screen:find('model status width', 1, true) ~= nil, 'Pi live viewport not visible')
+    check(vim.api.nvim_get_current_win() == draft_win, 'Pi restoration stole draft focus')
+    check(vim.api.nvim_get_mode().mode:sub(1,1) ~= 't', 'Pi restoration entered terminal input')
+    key('<C-g>'); wait(1100)
+    check(vim.api.nvim_get_mode().mode:sub(1,1) == 't' and vim.api.nvim_get_current_win() == win3,
+      'Pi-like close lost terminal input')
+  end
   cleanup(); print(('PASS: %d resize assertions'):format(checks)); vim.cmd('qa!')
 end)
 local ok, err = coroutine.resume(co)
